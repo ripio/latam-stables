@@ -65,6 +65,14 @@ else ifeq ($(findstring --network sepolia,$(ARGS)),--network sepolia)
 	NETWORK_ARGS := --rpc-url $(SEPOLIA_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 8000000 
 	VERIFY_ARGS := --verify --chain-id 11155111 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
+else ifeq ($(findstring --network worldchain-sepolia,$(ARGS)),--network worldchain-sepolia)
+	NETWORK_ARGS := --rpc-url $(WORLDCHAIN_SEPOLIA_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1000350 
+	VERIFY_ARGS := --verify --chain-id 4801 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
+
+else ifeq ($(findstring --network worldchain,$(ARGS)),--network worldchain)
+	NETWORK_ARGS := --rpc-url $(WORLDCHAIN_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1000350 
+	VERIFY_ARGS := --verify --chain-id 480 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
+
 else ifeq ($(findstring --network forked-ethereum,$(ARGS)),--network forked-ethereum)
 	NETWORK_ARGS := --rpc-url $(FORKED_ETHEREUM_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 2300000000
 	VERIFY_ARGS := 
