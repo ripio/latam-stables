@@ -11,14 +11,14 @@ contract DeployLatamStable is Script {
         address deployer = wallet;
 
         // Define initialization parameters
-        address initialOwner = deployer;
+        address admin = wallet;
         string memory tokenName = vm.envString("TOKEN_NAME");
         string memory tokenSymbol = vm.envString("TOKEN_SYMBOL");
 
         // Log parameter values
         console2.log("--------------------------------");
         console2.log("Deploying LatamStable with the following parameters:");
-        console2.log("Initial Owner:", initialOwner);
+        console2.log("Initial Owner:", admin);
         console2.log("Token Name:", tokenName);
         console2.log("Token Symbol:", tokenSymbol);
         console2.log("--------------------------------");
@@ -31,7 +31,7 @@ contract DeployLatamStable is Script {
         // Prepare initialization data
         bytes memory initData = abi.encodeWithSelector(
             LatamStable.initialize.selector,
-            initialOwner,
+            admin,
             tokenName,
             tokenSymbol
         );
