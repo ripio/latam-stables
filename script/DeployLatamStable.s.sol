@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
-import {LatamStable} from "../src/LatamStable.sol";
+import {MyToken} from "../src/LatamStable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract DeployLatamStable is Script {
@@ -11,14 +11,20 @@ contract DeployLatamStable is Script {
         address deployer = wallet;
 
         // Define initialization parameters
-        address initialOwner = deployer;
+        address defaultAdmin = wallet;
+        address pauser = wallet;
+        address minter = wallet;
+        address upgrader = wallet;
         string memory tokenName = vm.envString("TOKEN_NAME");
         string memory tokenSymbol = vm.envString("TOKEN_SYMBOL");
 
         // Log parameter values
         console2.log("--------------------------------");
         console2.log("Deploying LatamStable with the following parameters:");
-        console2.log("Initial Owner:", initialOwner);
+        console2.log("Default Admin:", defaultAdmin);
+        console2.log("Pauser:", pauser);
+        console2.log("Minter:", minter);
+        console2.log("Upgrader:", upgrader);
         console2.log("Token Name:", tokenName);
         console2.log("Token Symbol:", tokenSymbol);
         console2.log("--------------------------------");
@@ -26,12 +32,15 @@ contract DeployLatamStable is Script {
         vm.startBroadcast(wallet);
 
         // Deploy the contract implementation
-        LatamStable implementation = new LatamStable();
+        MyToken implementation = new MyToken();
 
         // Prepare initialization data
         bytes memory initData = abi.encodeWithSelector(
-            LatamStable.initialize.selector,
-            initialOwner,
+            MyToken.initialize.selector,
+            defaultAdmin,
+            pauser,
+            minter,
+            upgrader,
             tokenName,
             tokenSymbol
         );
