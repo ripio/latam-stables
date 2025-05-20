@@ -2,11 +2,11 @@
 pragma solidity ^0.8.27;
 
 import {Test, console2} from "forge-std/Test.sol";
-import {MyToken} from "../src/LatamStable.sol";
+import {LatamStable} from "../src/LatamStable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract LatamStableTest is Test {
-    MyToken public latamStable;
+    LatamStable public latamStable;
     address public admin;
     address public user;
     string public constant TOKEN_NAME = "Latam Stable";
@@ -17,11 +17,11 @@ contract LatamStableTest is Test {
         user = makeAddr("user");
 
         // Deploy implementation
-        MyToken implementation = new MyToken();
+        LatamStable implementation = new LatamStable();
 
         // Prepare initialization data
         bytes memory initData = abi.encodeWithSelector(
-            MyToken.initialize.selector,
+            LatamStable.initialize.selector,
             admin, // defaultAdmin
             admin, // pauser
             admin, // minter
@@ -37,7 +37,7 @@ contract LatamStableTest is Test {
         );
 
         // Initialize contract
-        latamStable = MyToken(address(proxy));
+        latamStable = LatamStable(address(proxy));
     }
 
     function test_Initialization() view public {
