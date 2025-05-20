@@ -3,7 +3,7 @@ pragma solidity ^0.8.27;
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
-import {MyToken} from "../src/LatamStable.sol";
+import {LatamStable} from "../src/LatamStable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract DeployLatamStable is Script {
@@ -11,10 +11,10 @@ contract DeployLatamStable is Script {
         address deployer = wallet;
 
         // Define initialization parameters
-        address defaultAdmin = wallet;
-        address pauser = wallet;
-        address minter = wallet;
-        address upgrader = wallet;
+        address defaultAdmin = vm.envAddress("DEFAULT_ADMIN");
+        address pauser = vm.envAddress("PAUSER");
+        address minter = vm.envAddress("MINTER");
+        address upgrader = vm.envAddress("UPGRADER");
         string memory tokenName = vm.envString("TOKEN_NAME");
         string memory tokenSymbol = vm.envString("TOKEN_SYMBOL");
 
@@ -32,11 +32,11 @@ contract DeployLatamStable is Script {
         vm.startBroadcast(wallet);
 
         // Deploy the contract implementation
-        MyToken implementation = new MyToken();
+        LatamStable implementation = new LatamStable();
 
         // Prepare initialization data
         bytes memory initData = abi.encodeWithSelector(
-            MyToken.initialize.selector,
+            LatamStable.initialize.selector,
             defaultAdmin,
             pauser,
             minter,
@@ -58,9 +58,13 @@ contract DeployLatamStable is Script {
         console2.log("--------------------------------");
         console2.log("LatamStable deployed at:", latamStableAddress);
         console2.log("Implementation deployed at:", address(implementation));
-        console2.log("Owner:", deployer);
+        console2.log("Deployer:", deployer);
         console2.log("Token Name:", tokenName);
         console2.log("Token Symbol:", tokenSymbol); 
+        console2.log("Default Admin:", defaultAdmin);
+        console2.log("Pauser:", pauser);
+        console2.log("Minter:", minter);
+        console2.log("Upgrader:", upgrader);
         console2.log("Contract initialized successfully");
         console2.log("--------------------------------");
         return latamStableAddress;
