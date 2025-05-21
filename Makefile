@@ -70,7 +70,7 @@ else ifeq ($(findstring --network worldchain-sepolia,$(ARGS)),--network worldcha
 	VERIFY_ARGS := --verify --chain-id 4801 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
 else ifeq ($(findstring --network worldchain,$(ARGS)),--network worldchain)
-	NETWORK_ARGS := --rpc-url $(WORLDCHAIN_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1000350 
+	NETWORK_ARGS := --rpc-url $(WORLDCHAIN_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1009000 
 	VERIFY_ARGS := --verify --chain-id 480 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
 else ifeq ($(findstring --network forked-ethereum,$(ARGS)),--network forked-ethereum)
