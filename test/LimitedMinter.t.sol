@@ -52,9 +52,10 @@ contract LimitedMinterTest is Test {
     function testRegisterTokenByExternalAdmin() public {
         vm.prank(externalAdmin);
         minter.registerToken(address(token), destination, 1000 ether);
-        (address dest, uint256 limit,,, ) = minter.tokenConfigs(address(token));
+        (address dest, uint256 limit, bool exists) = minter.tokenConfigs(address(token));
         assertEq(dest, destination);
         assertEq(limit, 1000 ether);
+        assertTrue(exists);
     }
 
     function test_RevertWhen_RegisterTokenByNonAdmin() public {
@@ -68,8 +69,8 @@ contract LimitedMinterTest is Test {
         minter.registerToken(address(token), destination, 1000 ether);
         vm.prank(externalAdmin);
         minter.unregisterToken(address(token));
-        (,,,, bool exists) = minter.tokenConfigs(address(token));
-        assertEq(exists, false);
+        (,, bool exists) = minter.tokenConfigs(address(token));
+        assertFalse(exists);
     }
 
     function testUpdateDailyMintLimit() public {
@@ -77,7 +78,7 @@ contract LimitedMinterTest is Test {
         minter.registerToken(address(token), destination, 1000 ether);
         vm.prank(externalAdmin);
         minter.updateDailyMintLimit(address(token), 500 ether);
-        (, uint256 limit,,, ) = minter.tokenConfigs(address(token));
+        (, uint256 limit, ) = minter.tokenConfigs(address(token));
         assertEq(limit, 500 ether);
     }
 
@@ -87,7 +88,7 @@ contract LimitedMinterTest is Test {
         address newDest = address(0xF);
         vm.prank(externalAdmin);
         minter.updateMintDestination(address(token), newDest);
-        (address dest,,,, ) = minter.tokenConfigs(address(token));
+        (address dest,, ) = minter.tokenConfigs(address(token));
         assertEq(dest, newDest);
     }
 
@@ -106,7 +107,7 @@ contract LimitedMinterTest is Test {
         vm.prank(minterUser);
         minter.mint(address(token), 800 ether);
         vm.prank(minterUser);
-        vm.expectRevert("Exceeds daily mint limit");
+        vm.expectRevert(LimitedMinter.ExceedsDailyMintLimit.selector);
         minter.mint(address(token), 300 ether);
     }
 
@@ -140,7 +141,7 @@ contract LimitedMinterTest is Test {
         vm.prank(externalAdmin);
         minter.registerToken(address(token), destination, 1000 ether);
         vm.prank(minterUser);
-        vm.expectRevert("Mint amount must be greater than zero");
+        vm.expectRevert(LimitedMinter.MintAmountZero.selector);
         minter.mint(address(token), 0);
     }
 
@@ -152,5 +153,25 @@ contract LimitedMinterTest is Test {
         assertEq(minter.mintedToday(address(token)), 400 ether);
         vm.warp(block.timestamp + 1 days);
         assertEq(minter.mintedToday(address(token)), 0);
+    }
+
+    function testPauseAndUnpause() public {
+        vm.prank(admin);
+        minter.pause();
+        vm.prank(externalAdmin);
+        minter.registerToken(address(token), destination, 1000 ether);
+        vm.prank(minterUser);
+        vm.expectRevert(bytes4(keccak256("EnforcedPause()")));
+        minter.mint(address(token), 100 ether);
+        vm.prank(admin);
+        minter.unpause();
+        vm.prank(minterUser);
+        minter.mint(address(token), 100 ether);
+        assertEq(token.balances(destination), 100 ether);
+    }
+
+    function testMintedTodayRevertsForUnregisteredToken() public {
+        vm.expectRevert(LimitedMinter.TokenNotRegistered.selector);
+        minter.mintedToday(address(token));
     }
 } 
