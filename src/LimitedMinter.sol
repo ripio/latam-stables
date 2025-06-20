@@ -65,6 +65,7 @@ contract LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausable {
     error TokenAlreadyRegistered();
     error MintAmountZero();
     error ExceedsDailyMintLimit();
+    error InvalidMintDestination();
 
     /**
      * @notice Constructor that sets up roles
@@ -111,6 +112,7 @@ contract LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausable {
         uint256 dailyMaxMint
     ) external onlyExternalAdmin(token) {
         if (token == address(0)) revert InvalidTokenAddress();
+        if (mintDestination == address(0)) revert InvalidMintDestination();
         if (tokenConfigs[token].exists) revert TokenAlreadyRegistered();
         tokenConfigs[token] = TokenConfig({
             mintDestination: mintDestination,
@@ -156,6 +158,7 @@ contract LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausable {
         onlyExternalAdmin(token)
         tokenExists(token)
     {
+        if (newDestination == address(0)) revert InvalidMintDestination();
         tokenConfigs[token].mintDestination = newDestination;
         emit MintDestinationUpdated(token, newDestination);
     }
