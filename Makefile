@@ -53,7 +53,7 @@ anvil:
 	anvil -m "test test test test test test test test test test test junk" --steps-tracing
 
 forked-ethereum:
-	anvil -m "test test test test test test test test test test test junk" --steps-tracing --fork-url $(ETHEREUM_RPC_URL) --chain-id 7400
+	anvil -m "test test test test test test test test test test test junk" --steps-tracing --fork-url $(ETHEREUM_RPC_URL) --chain-id 7400 --base-fee 1000000000
 
 NETWORK_ARGS := --rpc-url http://localhost:8545 --private-key $(DEFAULT_ANVIL_KEY) --broadcast
 
@@ -74,9 +74,12 @@ else ifeq ($(findstring --network worldchain,$(ARGS)),--network worldchain)
 	VERIFY_ARGS := --verify --chain-id 480 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
 else ifeq ($(findstring --network forked-ethereum,$(ARGS)),--network forked-ethereum)
-	NETWORK_ARGS := --rpc-url $(FORKED_ETHEREUM_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 2300000000
+	NETWORK_ARGS := --rpc-url $(FORKED_ETHEREUM_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 8000000000
 	VERIFY_ARGS := 
 
+else ifeq ($(findstring --network zkLatestnet,$(ARGS)),--network zkLatestnet)
+	NETWORK_ARGS := --rpc-url $(LATESTNET_ZK_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 25000000 --skip-simulation --slow --gas-limit 10000000
+	VERIFY_ARGS := --verify --chain-id 14183 --verifier custom --verifier-url $(LATESTNET_ZK_VERIFIER_URL) 
 else
 	VERIFY_ARGS :=
 endif
@@ -99,7 +102,11 @@ endif
 deploy-latam-stable:
 	@forge script script/DeployLatamStable.s.sol:DeployLatamStable $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
 
+deploy-limited-minter:
+	@forge script script/DeployLimitedMinter.s.sol:DeployLimitedMinter $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+set-limited-minter-role:
+	@forge script script/SetLimitedMinterRole.s.sol:SetLimitedMinterRole $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
 # cast wallet import --interactive key.json --keystore-dir keys
 # example command: make deploy-latam-stable ARGS="--network sepolia"
-
-
