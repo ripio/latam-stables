@@ -80,6 +80,10 @@ else ifeq ($(findstring --network forked-ethereum,$(ARGS)),--network forked-ethe
 else ifeq ($(findstring --network zkLatestnet,$(ARGS)),--network zkLatestnet)
 	NETWORK_ARGS := --rpc-url $(LATESTNET_ZK_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 25000000 --skip-simulation --slow --gas-limit 10000000
 	VERIFY_ARGS := --verify --chain-id 14183 --verifier custom --verifier-url $(LATESTNET_ZK_VERIFIER_URL) 
+
+else ifeq ($(findstring --network base,$(ARGS)),--network base)
+	NETWORK_ARGS := --rpc-url $(BASE_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 2500000 
+	VERIFY_ARGS := --verify --chain-id 8453 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 else
 	VERIFY_ARGS :=
 endif
