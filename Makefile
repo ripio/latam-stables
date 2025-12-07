@@ -112,5 +112,11 @@ deploy-limited-minter:
 set-limited-minter-role:
 	@forge script script/SetLimitedMinterRole.s.sol:SetLimitedMinterRole $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
 
+deploy-limited-minter-bridge:
+	@forge script script/DeployLimitedMinterBridge.s.sol:DeployLimitedMinterBridge $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+deploy-bridge-deposit:
+	@forge script script/DeployBridgeDeposit.s.sol:DeployBridgeDeposit $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
 # cast wallet import --interactive key.json --keystore-dir keys
 # example command: make deploy-latam-stable ARGS="--network sepolia"

@@ -108,3 +108,67 @@ make deploy-latam-stable ARGS="--network sepolia"
 ```
 
 This will run the deployment script using the parameters from your environment variables and print the deployed contract addresses and roles.
+
+## Bridge Contracts
+
+The bridge infrastructure enables cross-chain token transfers using a burn-and-mint mechanism.
+
+### Architecture
+
+1. **LimitedMinterBridge**: Rate-limited minting contract that enforces daily mint caps per token. Unlike `LimitedMinter`, it allows minting to arbitrary recipients (for bridge fulfillment).
+
+2. **BridgeDeposit**: Handles both sides of cross-chain bridges:
+   - **Source chain**: Users call `depositForBridge()` to burn tokens
+   - **Destination chain**: Bridge operators call `fulfillBridgeMint()` to mint tokens via `LimitedMinterBridge`
+
+### Deploying Bridge Contracts
+
+#### 1. Deploy LimitedMinterBridge
+
+Set environment variables:
+```
+DEFAULT_ADMIN=0xAdminAddress
+MINTER=0xMinterAddress  # Address that can call mintTo (e.g., BridgeDeposit contract)
+```
+
+Deploy:
+```
+make deploy-limited-minter-bridge ARGS="--network sepolia"
+```
+
+#### 2. Deploy BridgeDeposit
+
+Set environment variables:
+```
+BRIDGE_ADMIN=0xAdminAddress      # Receives DEFAULT_ADMIN_ROLE and BRIDGE_OPERATOR_ROLE
+LIMITED_MINTER=0xLimitedMinterBridgeAddress  # Address from step 1
+```
+
+Deploy:
+```
+make deploy-bridge-deposit ARGS="--network sepolia"
+```
+
+### Post-Deployment Setup
+
+After deploying both contracts, you need to:
+
+1. **Grant MINTER_ROLE on LimitedMinterBridge to BridgeDeposit**:
+   ```solidity
+   limitedMinterBridge.grantRole(MINTER_ROLE, bridgeDepositAddress);
+   ```
+
+2. **Register tokens in LimitedMinterBridge** (by token admin):
+   ```solidity
+   limitedMinterBridge.registerToken(tokenAddress, dailyMaxMint);
+   ```
+
+3. **Add supported tokens to BridgeDeposit** (by admin):
+   ```solidity
+   bridgeDeposit.setSupportedToken(tokenAddress, true);
+   ```
+
+4. **Grant MINTER_ROLE on LatamStable to LimitedMinterBridge** (by token admin):
+   ```solidity
+   latamStable.grantRole(MINTER_ROLE, limitedMinterBridgeAddress);
+   ```
