@@ -4,6 +4,7 @@ pragma solidity ^0.8.27;
 import "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface ILatamStableBurnable {
     function burnFrom(address account, uint256 amount) external;
@@ -107,6 +108,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @notice Emitted when LimitedMinterBridge reference is updated
     event LimitedMinterUpdated(address indexed oldMinter, address indexed newMinter);
 
+    /// @notice Emitted when tokens are rescued from the contract
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
+
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -199,6 +203,22 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      */
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
+    }
+
+    /**
+     * @notice Rescues tokens accidentally sent to this contract
+     * @dev Only callable by admin. Use this to recover tokens sent directly to the contract
+     *      instead of through depositForBridge.
+     * @param token Address of the token to rescue
+     * @param to Address to send the rescued tokens to
+     * @param amount Amount of tokens to rescue
+     */
+    function rescueTokens(address token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert AmountZero();
+
+        IERC20(token).transfer(to, amount);
+        emit TokensRescued(token, to, amount);
     }
 
     // -----------------------------------------------------------------------

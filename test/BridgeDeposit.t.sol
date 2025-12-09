@@ -38,6 +38,13 @@ contract MockBurnableToken {
         allowances[msg.sender][spender] = amount;
     }
 
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balances[msg.sender] >= amount, "Insufficient balance");
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+
     function grantRole(bytes32 role, address account) external {
         roles[account][role] = true;
     }
@@ -481,5 +488,44 @@ contract BridgeDepositTest is Test {
         // Original route disabled, new route still enabled
         assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
         assertTrue(bridge.bridgeRoutes(address(token), 42161));
+    }
+
+    // -------------------------------------------------------------------------
+    // Token rescue tests
+    // -------------------------------------------------------------------------
+
+    function testRescueTokens() public {
+        // Simulate tokens accidentally sent to bridge contract
+        // Use bridgeOperator to fulfill a mint to the bridge address (simulating accidental send)
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), address(bridge), 500 ether, 1, keccak256("rescue-test"), 1);
+
+        uint256 bridgeBalanceBefore = token.balances(address(bridge));
+        assertEq(bridgeBalanceBefore, 500 ether);
+
+        // Admin rescues the tokens
+        vm.prank(admin);
+        bridge.rescueTokens(address(token), recipient, 500 ether);
+
+        assertEq(token.balances(address(bridge)), 0);
+        assertEq(token.balances(recipient), 500 ether);
+    }
+
+    function test_RevertWhen_RescueByNonAdmin() public {
+        vm.prank(user);
+        vm.expectRevert();
+        bridge.rescueTokens(address(token), recipient, 100 ether);
+    }
+
+    function test_RevertWhen_RescueToZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(BridgeDeposit.ZeroAddress.selector);
+        bridge.rescueTokens(address(token), address(0), 100 ether);
+    }
+
+    function test_RevertWhen_RescueZeroAmount() public {
+        vm.prank(admin);
+        vm.expectRevert(BridgeDeposit.AmountZero.selector);
+        bridge.rescueTokens(address(token), recipient, 0);
     }
 }
