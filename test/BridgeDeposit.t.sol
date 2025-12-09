@@ -83,9 +83,11 @@ contract BridgeDepositTest is Test {
         vm.prank(admin);
         limitedMinter.grantRole(minterRole, address(bridge));
 
-        // Add supported token to BridgeDeposit
+        // Add outbound bridge route for token to DEST_CHAIN_ID
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
         vm.prank(admin);
-        bridge.setSupportedToken(address(token), true);
+        bridge.setBridgeRoutes(address(token), destChains, true);
 
         // Grant bridge operator role
         vm.prank(admin);
@@ -156,12 +158,22 @@ contract BridgeDepositTest is Test {
         assertEq(bridge.nextDepositId(), 4);
     }
 
-    function test_RevertWhen_DepositUnsupportedToken() public {
+    function test_RevertWhen_DepositUnsupportedRoute() public {
         MockBurnableToken unsupportedToken = new MockBurnableToken();
 
         vm.prank(user);
-        vm.expectRevert(BridgeDeposit.TokenNotSupported.selector);
+        vm.expectRevert(BridgeDeposit.InvalidRoute.selector);
         bridge.depositForBridge(address(unsupportedToken), 100 ether, DEST_CHAIN_ID, recipient, bytes32(0));
+    }
+
+    function test_RevertWhen_DepositToUnsupportedChain() public {
+        uint256 unsupportedChainId = 999;
+
+        vm.startPrank(user);
+        token.approve(address(bridge), 100 ether);
+        vm.expectRevert(BridgeDeposit.InvalidRoute.selector);
+        bridge.depositForBridge(address(token), 100 ether, unsupportedChainId, recipient, bytes32(0));
+        vm.stopPrank();
     }
 
     function test_RevertWhen_DepositZeroAmount() public {
@@ -237,13 +249,14 @@ contract BridgeDepositTest is Test {
         bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, sourceDepositId);
     }
 
-    function test_RevertWhen_FulfillUnsupportedToken() public {
-        MockBurnableToken unsupportedToken = new MockBurnableToken();
+    function test_RevertWhen_FulfillTokenNotInMinter() public {
+        MockBurnableToken unregisteredToken = new MockBurnableToken();
         bytes32 sourceTxHash = keccak256("tx-hash");
 
+        // Token not registered in LimitedMinterBridge - should revert
         vm.prank(bridgeOperator);
-        vm.expectRevert(BridgeDeposit.TokenNotSupported.selector);
-        bridge.fulfillBridgeMint(address(unsupportedToken), recipient, 100 ether, 1, sourceTxHash, 1);
+        vm.expectRevert(BridgeDeposit.TokenNotRegisteredInMinter.selector);
+        bridge.fulfillBridgeMint(address(unregisteredToken), recipient, 100 ether, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillZeroAmount() public {
@@ -292,37 +305,36 @@ contract BridgeDepositTest is Test {
     // Admin function tests
     // -------------------------------------------------------------------------
 
-    function testSetSupportedToken() public {
-        MockBurnableToken newToken = new MockBurnableToken();
-        newToken.grantRole(newToken.DEFAULT_ADMIN_ROLE(), externalTokenAdmin);
-        newToken.grantRole(newToken.MINTER_ROLE(), address(limitedMinter));
-
-        // Register in LimitedMinterBridge first
-        vm.prank(externalTokenAdmin);
-        limitedMinter.registerToken(address(newToken), 1000 ether);
-
-        // Now add to BridgeDeposit
+    function testSetBridgeRoutes() public {
+        // Set outbound routes to multiple chains
+        uint256[] memory destChains = new uint256[](2);
+        destChains[0] = 137; // Polygon
+        destChains[1] = 42161; // Arbitrum
+        
         vm.prank(admin);
-        vm.expectEmit(true, false, false, true);
-        emit BridgeDeposit.SupportedTokenUpdated(address(newToken), true);
-        bridge.setSupportedToken(address(newToken), true);
+        bridge.setBridgeRoutes(address(token), destChains, true);
 
-        assertTrue(bridge.supportedTokens(address(newToken)));
+        assertTrue(bridge.bridgeRoutes(address(token), 137));
+        assertTrue(bridge.bridgeRoutes(address(token), 42161));
     }
 
-    function test_RevertWhen_SetSupportedTokenNotInMinter() public {
-        MockBurnableToken newToken = new MockBurnableToken();
-
+    function testRemoveBridgeRoute() public {
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        
         vm.prank(admin);
-        vm.expectRevert(BridgeDeposit.TokenNotRegisteredInMinter.selector);
-        bridge.setSupportedToken(address(newToken), true);
+        bridge.setBridgeRoutes(address(token), destChains, false);
+
+        assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
     }
 
-    function testRemoveSupportedToken() public {
-        vm.prank(admin);
-        bridge.setSupportedToken(address(token), false);
+    function test_RevertWhen_SetRouteToSameChain() public {
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = block.chainid; // Current chain
 
-        assertFalse(bridge.supportedTokens(address(token)));
+        vm.prank(admin);
+        vm.expectRevert(BridgeDeposit.InvalidSourceChain.selector);
+        bridge.setBridgeRoutes(address(token), destChains, true);
     }
 
     function testUpdateLimitedMinter() public {
@@ -432,5 +444,42 @@ contract BridgeDepositTest is Test {
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.BridgeAlreadyFulfilled.selector);
         bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Route-based token support tests
+    // -------------------------------------------------------------------------
+
+    function testMultipleRoutesForToken() public {
+        // Add routes to multiple chains
+        uint256[] memory moreChains = new uint256[](2);
+        moreChains[0] = 42161; // Arbitrum
+        moreChains[1] = 10;    // Optimism
+        
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), moreChains, true);
+
+        // All routes should be enabled
+        assertTrue(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID)); // from setUp
+        assertTrue(bridge.bridgeRoutes(address(token), 42161));
+        assertTrue(bridge.bridgeRoutes(address(token), 10));
+    }
+
+    function testDisableSpecificRoute() public {
+        // First add another route
+        uint256[] memory extraChain = new uint256[](1);
+        extraChain[0] = 42161;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), extraChain, true);
+
+        // Now disable just the original route
+        uint256[] memory chainToDisable = new uint256[](1);
+        chainToDisable[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), chainToDisable, false);
+
+        // Original route disabled, new route still enabled
+        assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
+        assertTrue(bridge.bridgeRoutes(address(token), 42161));
     }
 }
