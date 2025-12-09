@@ -42,8 +42,8 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @notice Incremental ID for deposits initiated on this chain (local use / UI)
     uint256 public nextDepositId = 1;
 
-    /// @notice Tracks whether a given source-chain tx hash has already been fulfilled on this chain
-    /// @dev Keyed by sourceTxHash (EVM tx hash)
+    /// @notice Tracks whether a given bridge fulfillment has already been processed
+    /// @dev Keyed by keccak256(sourceChainId, sourceTxHash, sourceDepositId)
     mapping(bytes32 => bool) public bridgeFulfilled;
 
     // -----------------------------------------------------------------------
@@ -56,6 +56,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     error InvalidRecipient();
     error BridgeAlreadyFulfilled();
     error TokenNotRegisteredInMinter();
+    error InvalidSourceChain();
 
     // -----------------------------------------------------------------------
     // Events
@@ -87,14 +88,16 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      * @param to Recipient on this chain
      * @param amount Amount minted
      * @param sourceChainId Chain ID where the original burn/deposit occurred
-     * @param sourceTxHash Transaction hash of the source-chain deposit (if EVM, 32 bytes)
+     * @param sourceTxHash Transaction hash of the source-chain deposit (for auditability)
+     * @param sourceDepositId Deposit ID from the source chain's BridgeDepositInitiated event
      */
     event BridgeMintFulfilled(
         address indexed token,
         address indexed to,
         uint256 amount,
         uint256 sourceChainId,
-        bytes32 indexed sourceTxHash
+        bytes32 sourceTxHash,
+        uint256 indexed sourceDepositId
     );
 
     /// @notice Emitted when token support is updated
@@ -242,21 +245,23 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      *  - Callable only by BRIDGE_OPERATOR_ROLE (off-chain bridge service).
      *  - This contract must have MINTER_ROLE on LimitedMinterBridge so that `mintTo` succeeds.
      *  - LimitedMinterBridge enforces the daily mint limit per token.
-     *  - Idempotency: we use `sourceTxHash` as the unique key so we don't process
-     *    the same source transaction more than once, even across chains.
+     *  - Idempotency: composite key of (sourceChainId, sourceTxHash, sourceDepositId)
+     *    ensures uniqueness across chains and within multi-deposit transactions.
      *
      *  @param token Address of the token to mint
      *  @param to Recipient on this chain
      *  @param amount Amount to mint
      *  @param sourceChainId Chain ID of the source chain where the deposit occurred
-     *  @param sourceTxHash Transaction hash of the source chain deposit (for auditability & idempotency)
+     *  @param sourceTxHash Transaction hash of the source chain deposit (for auditability)
+     *  @param sourceDepositId The depositId from BridgeDepositInitiated event on source chain
      */
     function fulfillBridgeMint(
         address token,
         address to,
         uint256 amount,
         uint256 sourceChainId,
-        bytes32 sourceTxHash
+        bytes32 sourceTxHash,
+        uint256 sourceDepositId
     )
         external
         nonReentrant
@@ -264,12 +269,19 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         onlyRole(BRIDGE_OPERATOR_ROLE)
         onlySupportedToken(token)
     {
-        if (bridgeFulfilled[sourceTxHash]) revert BridgeAlreadyFulfilled();
+        // Prevent same-chain fulfillment
+        if (sourceChainId == block.chainid) revert InvalidSourceChain();
+
+        // Composite key for idempotency: chainId + txHash + depositId
+        bytes32 fulfillmentKey = keccak256(
+            abi.encodePacked(sourceChainId, sourceTxHash, sourceDepositId)
+        );
+
+        if (bridgeFulfilled[fulfillmentKey]) revert BridgeAlreadyFulfilled();
         if (amount == 0) revert AmountZero();
         if (to == address(0)) revert InvalidRecipient();
-        // sourceChainId is emitted for off-chain auditing; sourceTxHash is our idempotency key
 
-        bridgeFulfilled[sourceTxHash] = true;
+        bridgeFulfilled[fulfillmentKey] = true;
 
         // Mint via LimitedMinterBridge (enforces per-day limits)
         limitedMinter.mintTo(token, to, amount);
@@ -279,7 +291,8 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
             to,
             amount,
             sourceChainId,
-            sourceTxHash
+            sourceTxHash,
+            sourceDepositId
         );
     }
 
