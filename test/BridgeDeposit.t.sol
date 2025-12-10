@@ -528,4 +528,87 @@ contract BridgeDepositTest is Test {
         vm.expectRevert(BridgeDeposit.AmountZero.selector);
         bridge.rescueTokens(address(token), recipient, 0);
     }
+
+    // -------------------------------------------------------------------------
+    // Conservation tracking tests
+    // -------------------------------------------------------------------------
+
+    function testTotalBurnedToAfterDeposit() public {
+        uint256 amount = 100 ether;
+
+        // Initial stats should be zero
+        (uint256 burnedBefore,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burnedBefore, 0);
+
+        // Make deposit
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // Verify totalBurnedTo incremented
+        (uint256 burnedAfter,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burnedAfter, amount);
+    }
+
+    function testTotalMintedFromAfterFulfill() public {
+        uint256 amount = 500 ether;
+        uint256 sourceChainId = 1;
+
+        // Initial stats should be zero
+        (, uint256 mintedBefore) = bridge.getBridgeStats(address(token), sourceChainId);
+        assertEq(mintedBefore, 0);
+
+        // Fulfill bridge mint
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, sourceChainId, keccak256("tx-1"), 1);
+
+        // Verify totalMintedFrom incremented
+        (, uint256 mintedAfter) = bridge.getBridgeStats(address(token), sourceChainId);
+        assertEq(mintedAfter, amount);
+    }
+
+    function testConservationStatsAccumulate() public {
+        uint256 amount1 = 100 ether;
+        uint256 amount2 = 200 ether;
+
+        // Multiple deposits
+        vm.startPrank(user);
+        token.approve(address(bridge), amount1 + amount2);
+        bridge.depositForBridge(address(token), amount1, DEST_CHAIN_ID, recipient, bytes32(0));
+        bridge.depositForBridge(address(token), amount2, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // Verify accumulation
+        (uint256 burned,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burned, amount1 + amount2);
+
+        // Multiple fulfillments from same source chain
+        vm.startPrank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount1, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount2, 1, keccak256("tx-2"), 2);
+        vm.stopPrank();
+
+        (, uint256 minted) = bridge.getBridgeStats(address(token), 1);
+        assertEq(minted, amount1 + amount2);
+    }
+
+    function testBridgeStatsPerChainIsolation() public {
+        uint256 amount = 100 ether;
+
+        // Fulfill from chain 1
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, 1, keccak256("tx-1"), 1);
+
+        // Fulfill from chain 2
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount * 2, 2, keccak256("tx-2"), 1);
+
+        // Verify per-chain isolation
+        (, uint256 mintedFromChain1) = bridge.getBridgeStats(address(token), 1);
+        (, uint256 mintedFromChain2) = bridge.getBridgeStats(address(token), 2);
+
+        assertEq(mintedFromChain1, amount);
+        assertEq(mintedFromChain2, amount * 2);
+    }
 }
