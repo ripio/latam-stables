@@ -48,6 +48,14 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @dev Keyed by keccak256(sourceChainId, sourceTxHash, sourceDepositId)
     mapping(bytes32 => bool) public bridgeFulfilled;
 
+    /// @notice Total burned per token per destination chain (outbound)
+    /// @dev Used for cross-chain conservation auditing
+    mapping(address => mapping(uint256 => uint256)) public totalBurnedTo;
+
+    /// @notice Total minted per token per source chain (inbound)
+    /// @dev Used for cross-chain conservation auditing
+    mapping(address => mapping(uint256 => uint256)) public totalMintedFrom;
+
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
@@ -258,6 +266,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         // Burn tokens from the user using allowance
         ILatamStableBurnable(token).burnFrom(msg.sender, amount);
 
+        // Track total burned for conservation auditing
+        totalBurnedTo[token][destChainId] += amount;
+
         depositId = nextDepositId++;
         emit BridgeDepositInitiated(
             depositId,
@@ -321,6 +332,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         // Mint via LimitedMinterBridge (enforces per-day limits)
         limitedMinter.mintTo(token, to, amount);
 
+        // Track total minted for conservation auditing
+        totalMintedFrom[token][sourceChainId] += amount;
+
         emit BridgeMintFulfilled(
             token,
             to,
@@ -351,6 +365,23 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         } else {
             remaining = 0;
         }
+    }
+
+    /**
+     * @notice Returns conservation stats for cross-chain auditing
+     * @dev Compare burnedTo on source chain with mintedFrom on destination chain
+     * @param token Token address
+     * @param chainId Chain ID to query stats for
+     * @return burnedTo Total tokens burned to this chainId (outbound)
+     * @return mintedFrom Total tokens minted from this chainId (inbound)
+     */
+    function getBridgeStats(address token, uint256 chainId)
+        external
+        view
+        returns (uint256 burnedTo, uint256 mintedFrom)
+    {
+        burnedTo = totalBurnedTo[token][chainId];
+        mintedFrom = totalMintedFrom[token][chainId];
     }
 }
 
