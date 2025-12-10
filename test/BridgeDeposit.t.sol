@@ -38,6 +38,13 @@ contract MockBurnableToken {
         allowances[msg.sender][spender] = amount;
     }
 
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balances[msg.sender] >= amount, "Insufficient balance");
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+
     function grantRole(bytes32 role, address account) external {
         roles[account][role] = true;
     }
@@ -83,9 +90,11 @@ contract BridgeDepositTest is Test {
         vm.prank(admin);
         limitedMinter.grantRole(minterRole, address(bridge));
 
-        // Add supported token to BridgeDeposit
+        // Add outbound bridge route for token to DEST_CHAIN_ID
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
         vm.prank(admin);
-        bridge.setSupportedToken(address(token), true);
+        bridge.setBridgeRoutes(address(token), destChains, true);
 
         // Grant bridge operator role
         vm.prank(admin);
@@ -156,12 +165,22 @@ contract BridgeDepositTest is Test {
         assertEq(bridge.nextDepositId(), 4);
     }
 
-    function test_RevertWhen_DepositUnsupportedToken() public {
+    function test_RevertWhen_DepositUnsupportedRoute() public {
         MockBurnableToken unsupportedToken = new MockBurnableToken();
 
         vm.prank(user);
-        vm.expectRevert(BridgeDeposit.TokenNotSupported.selector);
+        vm.expectRevert(BridgeDeposit.InvalidRoute.selector);
         bridge.depositForBridge(address(unsupportedToken), 100 ether, DEST_CHAIN_ID, recipient, bytes32(0));
+    }
+
+    function test_RevertWhen_DepositToUnsupportedChain() public {
+        uint256 unsupportedChainId = 999;
+
+        vm.startPrank(user);
+        token.approve(address(bridge), 100 ether);
+        vm.expectRevert(BridgeDeposit.InvalidRoute.selector);
+        bridge.depositForBridge(address(token), 100 ether, unsupportedChainId, recipient, bytes32(0));
+        vm.stopPrank();
     }
 
     function test_RevertWhen_DepositZeroAmount() public {
@@ -237,13 +256,14 @@ contract BridgeDepositTest is Test {
         bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, sourceDepositId);
     }
 
-    function test_RevertWhen_FulfillUnsupportedToken() public {
-        MockBurnableToken unsupportedToken = new MockBurnableToken();
+    function test_RevertWhen_FulfillTokenNotInMinter() public {
+        MockBurnableToken unregisteredToken = new MockBurnableToken();
         bytes32 sourceTxHash = keccak256("tx-hash");
 
+        // Token not registered in LimitedMinterBridge - should revert
         vm.prank(bridgeOperator);
-        vm.expectRevert(BridgeDeposit.TokenNotSupported.selector);
-        bridge.fulfillBridgeMint(address(unsupportedToken), recipient, 100 ether, 1, sourceTxHash, 1);
+        vm.expectRevert(BridgeDeposit.TokenNotRegisteredInMinter.selector);
+        bridge.fulfillBridgeMint(address(unregisteredToken), recipient, 100 ether, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillZeroAmount() public {
@@ -292,37 +312,36 @@ contract BridgeDepositTest is Test {
     // Admin function tests
     // -------------------------------------------------------------------------
 
-    function testSetSupportedToken() public {
-        MockBurnableToken newToken = new MockBurnableToken();
-        newToken.grantRole(newToken.DEFAULT_ADMIN_ROLE(), externalTokenAdmin);
-        newToken.grantRole(newToken.MINTER_ROLE(), address(limitedMinter));
-
-        // Register in LimitedMinterBridge first
-        vm.prank(externalTokenAdmin);
-        limitedMinter.registerToken(address(newToken), 1000 ether);
-
-        // Now add to BridgeDeposit
+    function testSetBridgeRoutes() public {
+        // Set outbound routes to multiple chains
+        uint256[] memory destChains = new uint256[](2);
+        destChains[0] = 137; // Polygon
+        destChains[1] = 42161; // Arbitrum
+        
         vm.prank(admin);
-        vm.expectEmit(true, false, false, true);
-        emit BridgeDeposit.SupportedTokenUpdated(address(newToken), true);
-        bridge.setSupportedToken(address(newToken), true);
+        bridge.setBridgeRoutes(address(token), destChains, true);
 
-        assertTrue(bridge.supportedTokens(address(newToken)));
+        assertTrue(bridge.bridgeRoutes(address(token), 137));
+        assertTrue(bridge.bridgeRoutes(address(token), 42161));
     }
 
-    function test_RevertWhen_SetSupportedTokenNotInMinter() public {
-        MockBurnableToken newToken = new MockBurnableToken();
-
+    function testRemoveBridgeRoute() public {
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        
         vm.prank(admin);
-        vm.expectRevert(BridgeDeposit.TokenNotRegisteredInMinter.selector);
-        bridge.setSupportedToken(address(newToken), true);
+        bridge.setBridgeRoutes(address(token), destChains, false);
+
+        assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
     }
 
-    function testRemoveSupportedToken() public {
-        vm.prank(admin);
-        bridge.setSupportedToken(address(token), false);
+    function test_RevertWhen_SetRouteToSameChain() public {
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = block.chainid; // Current chain
 
-        assertFalse(bridge.supportedTokens(address(token)));
+        vm.prank(admin);
+        vm.expectRevert(BridgeDeposit.InvalidSourceChain.selector);
+        bridge.setBridgeRoutes(address(token), destChains, true);
     }
 
     function testUpdateLimitedMinter() public {
@@ -432,5 +451,164 @@ contract BridgeDepositTest is Test {
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.BridgeAlreadyFulfilled.selector);
         bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Route-based token support tests
+    // -------------------------------------------------------------------------
+
+    function testMultipleRoutesForToken() public {
+        // Add routes to multiple chains
+        uint256[] memory moreChains = new uint256[](2);
+        moreChains[0] = 42161; // Arbitrum
+        moreChains[1] = 10;    // Optimism
+        
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), moreChains, true);
+
+        // All routes should be enabled
+        assertTrue(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID)); // from setUp
+        assertTrue(bridge.bridgeRoutes(address(token), 42161));
+        assertTrue(bridge.bridgeRoutes(address(token), 10));
+    }
+
+    function testDisableSpecificRoute() public {
+        // First add another route
+        uint256[] memory extraChain = new uint256[](1);
+        extraChain[0] = 42161;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), extraChain, true);
+
+        // Now disable just the original route
+        uint256[] memory chainToDisable = new uint256[](1);
+        chainToDisable[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), chainToDisable, false);
+
+        // Original route disabled, new route still enabled
+        assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
+        assertTrue(bridge.bridgeRoutes(address(token), 42161));
+    }
+
+    // -------------------------------------------------------------------------
+    // Token rescue tests
+    // -------------------------------------------------------------------------
+
+    function testRescueTokens() public {
+        // Simulate tokens accidentally sent to bridge contract
+        // Use bridgeOperator to fulfill a mint to the bridge address (simulating accidental send)
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), address(bridge), 500 ether, 1, keccak256("rescue-test"), 1);
+
+        uint256 bridgeBalanceBefore = token.balances(address(bridge));
+        assertEq(bridgeBalanceBefore, 500 ether);
+
+        // Admin rescues the tokens
+        vm.prank(admin);
+        bridge.rescueTokens(address(token), recipient, 500 ether);
+
+        assertEq(token.balances(address(bridge)), 0);
+        assertEq(token.balances(recipient), 500 ether);
+    }
+
+    function test_RevertWhen_RescueByNonAdmin() public {
+        vm.prank(user);
+        vm.expectRevert();
+        bridge.rescueTokens(address(token), recipient, 100 ether);
+    }
+
+    function test_RevertWhen_RescueToZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(BridgeDeposit.ZeroAddress.selector);
+        bridge.rescueTokens(address(token), address(0), 100 ether);
+    }
+
+    function test_RevertWhen_RescueZeroAmount() public {
+        vm.prank(admin);
+        vm.expectRevert(BridgeDeposit.AmountZero.selector);
+        bridge.rescueTokens(address(token), recipient, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Conservation tracking tests
+    // -------------------------------------------------------------------------
+
+    function testTotalBurnedToAfterDeposit() public {
+        uint256 amount = 100 ether;
+
+        // Initial stats should be zero
+        (uint256 burnedBefore,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burnedBefore, 0);
+
+        // Make deposit
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // Verify totalBurnedTo incremented
+        (uint256 burnedAfter,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burnedAfter, amount);
+    }
+
+    function testTotalMintedFromAfterFulfill() public {
+        uint256 amount = 500 ether;
+        uint256 sourceChainId = 1;
+
+        // Initial stats should be zero
+        (, uint256 mintedBefore) = bridge.getBridgeStats(address(token), sourceChainId);
+        assertEq(mintedBefore, 0);
+
+        // Fulfill bridge mint
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, sourceChainId, keccak256("tx-1"), 1);
+
+        // Verify totalMintedFrom incremented
+        (, uint256 mintedAfter) = bridge.getBridgeStats(address(token), sourceChainId);
+        assertEq(mintedAfter, amount);
+    }
+
+    function testConservationStatsAccumulate() public {
+        uint256 amount1 = 100 ether;
+        uint256 amount2 = 200 ether;
+
+        // Multiple deposits
+        vm.startPrank(user);
+        token.approve(address(bridge), amount1 + amount2);
+        bridge.depositForBridge(address(token), amount1, DEST_CHAIN_ID, recipient, bytes32(0));
+        bridge.depositForBridge(address(token), amount2, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // Verify accumulation
+        (uint256 burned,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burned, amount1 + amount2);
+
+        // Multiple fulfillments from same source chain
+        vm.startPrank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount1, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount2, 1, keccak256("tx-2"), 2);
+        vm.stopPrank();
+
+        (, uint256 minted) = bridge.getBridgeStats(address(token), 1);
+        assertEq(minted, amount1 + amount2);
+    }
+
+    function testBridgeStatsPerChainIsolation() public {
+        uint256 amount = 100 ether;
+
+        // Fulfill from chain 1
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, 1, keccak256("tx-1"), 1);
+
+        // Fulfill from chain 2
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount * 2, 2, keccak256("tx-2"), 1);
+
+        // Verify per-chain isolation
+        (, uint256 mintedFromChain1) = bridge.getBridgeStats(address(token), 1);
+        (, uint256 mintedFromChain2) = bridge.getBridgeStats(address(token), 2);
+
+        assertEq(mintedFromChain1, amount);
+        assertEq(mintedFromChain2, amount * 2);
     }
 }

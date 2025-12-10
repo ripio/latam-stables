@@ -4,6 +4,7 @@ pragma solidity ^0.8.27;
 import "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface ILatamStableBurnable {
     function burnFrom(address account, uint256 amount) external;
@@ -36,8 +37,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @notice LimitedMinterBridge instance used for minting on this chain
     ILimitedMinterBridge public limitedMinter;
 
-    /// @notice Supported tokens for bridging on this chain
-    mapping(address => bool) public supportedTokens;
+    /// @notice Outbound bridge routes: token => destChainId => enabled
+    /// @dev Controls which tokens can be deposited (burned) to which destination chains
+    mapping(address => mapping(uint256 => bool)) public bridgeRoutes;
 
     /// @notice Incremental ID for deposits initiated on this chain (local use / UI)
     uint256 public nextDepositId = 1;
@@ -46,17 +48,25 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @dev Keyed by keccak256(sourceChainId, sourceTxHash, sourceDepositId)
     mapping(bytes32 => bool) public bridgeFulfilled;
 
+    /// @notice Total burned per token per destination chain (outbound)
+    /// @dev Used for cross-chain conservation auditing
+    mapping(address => mapping(uint256 => uint256)) public totalBurnedTo;
+
+    /// @notice Total minted per token per source chain (inbound)
+    /// @dev Used for cross-chain conservation auditing
+    mapping(address => mapping(uint256 => uint256)) public totalMintedFrom;
+
     // -----------------------------------------------------------------------
     // Errors
     // -----------------------------------------------------------------------
 
     error ZeroAddress();
-    error TokenNotSupported();
     error AmountZero();
     error InvalidRecipient();
     error BridgeAlreadyFulfilled();
     error TokenNotRegisteredInMinter();
     error InvalidSourceChain();
+    error InvalidRoute();
 
     // -----------------------------------------------------------------------
     // Events
@@ -100,11 +110,14 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         uint256 indexed sourceDepositId
     );
 
-    /// @notice Emitted when token support is updated
-    event SupportedTokenUpdated(address indexed token, bool isSupported);
+    /// @notice Emitted when outbound bridge routes are updated
+    event BridgeRoutesUpdated(address indexed token, uint256[] destChainIds, bool enabled);
 
     /// @notice Emitted when LimitedMinterBridge reference is updated
     event LimitedMinterUpdated(address indexed oldMinter, address indexed newMinter);
+
+    /// @notice Emitted when tokens are rescued from the contract
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
     // -----------------------------------------------------------------------
     // Constructor
@@ -129,9 +142,18 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     // Modifiers
     // -----------------------------------------------------------------------
 
-    modifier onlySupportedToken(address token) {
-        if (!supportedTokens[token]) {
-            revert TokenNotSupported();
+    /// @notice For inbound fulfillments - checks if token is registered in LimitedMinterBridge
+    /// @dev This is the single source of truth for mintable tokens on this chain
+    modifier onlyMintableToken(address token) {
+        (, bool exists) = limitedMinter.tokenConfigs(token);
+        if (!exists) revert TokenNotRegisteredInMinter();
+        _;
+    }
+
+    /// @notice For outbound deposits - checks if route is enabled
+    modifier onlyValidRoute(address token, uint256 destChainId) {
+        if (!bridgeRoutes[token][destChainId]) {
+            revert InvalidRoute();
         }
         _;
     }
@@ -141,21 +163,27 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     // -----------------------------------------------------------------------
 
     /**
-     * @notice Adds or removes a token from the supported list
-     * @dev When enabling a token, ensure it is registered in LimitedMinterBridge
-     *      so that minting on this chain is possible.
+     * @notice Enables/disables outbound bridge routes (deposits from this chain to destination chains)
+     * @dev For INBOUND fulfillments, the token must be registered in LimitedMinterBridge directly.
+     *      This function only controls OUTBOUND deposits - which tokens can be burned and bridged out.
+     * @param token Token address
+     * @param destChainIds Array of destination chain IDs to enable/disable
+     * @param enabled Whether to enable or disable these routes
      */
-    function setSupportedToken(address token, bool isSupported) external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function setBridgeRoutes(
+        address token,
+        uint256[] calldata destChainIds,
+        bool enabled
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (token == address(0)) revert ZeroAddress();
 
-        if (isSupported) {
-            // Validate that the token is configured on the LimitedMinterBridge (optional but recommended)
-            (, bool exists) = limitedMinter.tokenConfigs(token);
-            if (!exists) revert TokenNotRegisteredInMinter();
+        for (uint256 i = 0; i < destChainIds.length; ) {
+            if (destChainIds[i] == block.chainid) revert InvalidSourceChain();
+            bridgeRoutes[token][destChainIds[i]] = enabled;
+            unchecked { ++i; }
         }
 
-        supportedTokens[token] = isSupported;
-        emit SupportedTokenUpdated(token, isSupported);
+        emit BridgeRoutesUpdated(token, destChainIds, enabled);
     }
 
     /**
@@ -183,6 +211,22 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      */
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
+    }
+
+    /**
+     * @notice Rescues tokens accidentally sent to this contract
+     * @dev Only callable by admin. Use this to recover tokens sent directly to the contract
+     *      instead of through depositForBridge.
+     * @param token Address of the token to rescue
+     * @param to Address to send the rescued tokens to
+     * @param amount Amount of tokens to rescue
+     */
+    function rescueTokens(address token, address to, uint256 amount) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert AmountZero();
+
+        IERC20(token).transfer(to, amount);
+        emit TokensRescued(token, to, amount);
     }
 
     // -----------------------------------------------------------------------
@@ -213,15 +257,17 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         external
         nonReentrant
         whenNotPaused
-        onlySupportedToken(token)
+        onlyValidRoute(token, destChainId)
         returns (uint256 depositId)
     {
         if (amount == 0) revert AmountZero();
         if (destRecipient == address(0)) revert InvalidRecipient();
-        // destChainId can be 0 in tests but should be validated off-chain for production
 
         // Burn tokens from the user using allowance
         ILatamStableBurnable(token).burnFrom(msg.sender, amount);
+
+        // Track total burned for conservation auditing
+        totalBurnedTo[token][destChainId] += amount;
 
         depositId = nextDepositId++;
         emit BridgeDepositInitiated(
@@ -267,7 +313,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         nonReentrant
         whenNotPaused
         onlyRole(BRIDGE_OPERATOR_ROLE)
-        onlySupportedToken(token)
+        onlyMintableToken(token)
     {
         // Prevent same-chain fulfillment
         if (sourceChainId == block.chainid) revert InvalidSourceChain();
@@ -285,6 +331,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
 
         // Mint via LimitedMinterBridge (enforces per-day limits)
         limitedMinter.mintTo(token, to, amount);
+
+        // Track total minted for conservation auditing
+        totalMintedFrom[token][sourceChainId] += amount;
 
         emit BridgeMintFulfilled(
             token,
@@ -316,6 +365,23 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         } else {
             remaining = 0;
         }
+    }
+
+    /**
+     * @notice Returns conservation stats for cross-chain auditing
+     * @dev Compare burnedTo on source chain with mintedFrom on destination chain
+     * @param token Token address
+     * @param chainId Chain ID to query stats for
+     * @return burnedTo Total tokens burned to this chainId (outbound)
+     * @return mintedFrom Total tokens minted from this chainId (inbound)
+     */
+    function getBridgeStats(address token, uint256 chainId)
+        external
+        view
+        returns (uint256 burnedTo, uint256 mintedFrom)
+    {
+        burnedTo = totalBurnedTo[token][chainId];
+        mintedFrom = totalMintedFrom[token][chainId];
     }
 }
 
