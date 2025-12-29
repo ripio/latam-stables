@@ -37,6 +37,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @notice LimitedMinterBridge instance used for minting on this chain
     ILimitedMinterBridge public limitedMinter;
 
+    /// @notice Address that receives bridge fees
+    address public feeCollector;
+
     /// @notice Outbound bridge routes: token => destChainId => enabled
     /// @dev Controls which tokens can be deposited (burned) to which destination chains
     mapping(address => mapping(uint256 => bool)) public bridgeRoutes;
@@ -67,6 +70,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     error TokenNotRegisteredInMinter();
     error InvalidSourceChain();
     error InvalidRoute();
+    error FeeExceedsAmount();
 
     // -----------------------------------------------------------------------
     // Events
@@ -96,7 +100,8 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      * @notice Emitted when a cross-chain bridge is fulfilled (mint) on this chain
      * @param token Address of the token being minted
      * @param to Recipient on this chain
-     * @param amount Amount minted
+     * @param amount Amount minted to recipient (after fee)
+     * @param fee Fee amount minted to feeCollector
      * @param sourceChainId Chain ID where the original burn/deposit occurred
      * @param sourceTxHash Transaction hash of the source-chain deposit (for auditability)
      * @param sourceDepositId Deposit ID from the source chain's BridgeDepositInitiated event
@@ -105,6 +110,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         address indexed token,
         address indexed to,
         uint256 amount,
+        uint256 fee,
         uint256 sourceChainId,
         bytes32 sourceTxHash,
         uint256 indexed sourceDepositId
@@ -119,6 +125,9 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @notice Emitted when tokens are rescued from the contract
     event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice Emitted when the fee collector address is updated
+    event FeeCollectorUpdated(address indexed oldFeeCollector, address indexed newFeeCollector);
+
     // -----------------------------------------------------------------------
     // Constructor
     // -----------------------------------------------------------------------
@@ -126,13 +135,15 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /**
      * @param admin Address that receives DEFAULT_ADMIN_ROLE and BRIDGE_OPERATOR_ROLE
      * @param _limitedMinter Address of the LimitedMinterBridge contract on this chain
+     * @param _feeCollector Address that receives bridge fees (can be address(0) if no fees)
      */
-    constructor(address admin, ILimitedMinterBridge _limitedMinter) {
+    constructor(address admin, ILimitedMinterBridge _limitedMinter, address _feeCollector) {
         if (admin == address(0) || address(_limitedMinter) == address(0)) {
             revert ZeroAddress();
         }
 
         limitedMinter = _limitedMinter;
+        feeCollector = _feeCollector;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BRIDGE_OPERATOR_ROLE, admin);
@@ -229,6 +240,17 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         emit TokensRescued(token, to, amount);
     }
 
+    /**
+     * @notice Updates the fee collector address
+     * @dev Only callable by admin. Can be set to address(0) to disable fee collection.
+     * @param newFeeCollector New fee collector address
+     */
+    function setFeeCollector(address newFeeCollector) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        address oldFeeCollector = feeCollector;
+        feeCollector = newFeeCollector;
+        emit FeeCollectorUpdated(oldFeeCollector, newFeeCollector);
+    }
+
     // -----------------------------------------------------------------------
     // User-facing: Deposit (burn) on source chain
     // -----------------------------------------------------------------------
@@ -293,10 +315,12 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      *  - LimitedMinterBridge enforces the daily mint limit per token.
      *  - Idempotency: composite key of (sourceChainId, sourceTxHash, sourceDepositId)
      *    ensures uniqueness across chains and within multi-deposit transactions.
+     *  - If fee > 0 and feeCollector is set, fee is minted to feeCollector.
      *
      *  @param token Address of the token to mint
      *  @param to Recipient on this chain
-     *  @param amount Amount to mint
+     *  @param amount Total amount to mint (recipient receives amount - fee)
+     *  @param fee Fee amount to mint to feeCollector (can be 0)
      *  @param sourceChainId Chain ID of the source chain where the deposit occurred
      *  @param sourceTxHash Transaction hash of the source chain deposit (for auditability)
      *  @param sourceDepositId The depositId from BridgeDepositInitiated event on source chain
@@ -305,6 +329,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         address token,
         address to,
         uint256 amount,
+        uint256 fee,
         uint256 sourceChainId,
         bytes32 sourceTxHash,
         uint256 sourceDepositId
@@ -326,19 +351,30 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         if (bridgeFulfilled[fulfillmentKey]) revert BridgeAlreadyFulfilled();
         if (amount == 0) revert AmountZero();
         if (to == address(0)) revert InvalidRecipient();
+        if (fee > amount) revert FeeExceedsAmount();
 
         bridgeFulfilled[fulfillmentKey] = true;
 
-        // Mint via LimitedMinterBridge (enforces per-day limits)
-        limitedMinter.mintTo(token, to, amount);
+        uint256 recipientAmount = amount - fee;
 
-        // Track total minted for conservation auditing
+        // Mint to recipient via LimitedMinterBridge (enforces per-day limits)
+        if (recipientAmount > 0) {
+            limitedMinter.mintTo(token, to, recipientAmount);
+        }
+
+        // Mint fee to feeCollector if applicable
+        if (fee > 0 && feeCollector != address(0)) {
+            limitedMinter.mintTo(token, feeCollector, fee);
+        }
+
+        // Track total minted for conservation auditing (full amount including fee)
         totalMintedFrom[token][sourceChainId] += amount;
 
         emit BridgeMintFulfilled(
             token,
             to,
-            amount,
+            recipientAmount,
+            fee,
             sourceChainId,
             sourceTxHash,
             sourceDepositId

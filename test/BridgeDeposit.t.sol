@@ -60,6 +60,7 @@ contract BridgeDepositTest is Test {
     address public externalTokenAdmin = address(0xC);
     address public user = address(0xD);
     address public recipient = address(0xE);
+    address public feeCollector = address(0xF);
 
     uint256 public constant DAILY_LIMIT = 10000 ether;
     uint256 public constant DEST_CHAIN_ID = 137;
@@ -71,8 +72,8 @@ contract BridgeDepositTest is Test {
         // Deploy LimitedMinterBridge
         limitedMinter = new LimitedMinterBridge(admin, admin);
 
-        // Deploy BridgeDeposit
-        bridge = new BridgeDeposit(admin, ILimitedMinterBridge(address(limitedMinter)));
+        // Deploy BridgeDeposit with feeCollector
+        bridge = new BridgeDeposit(admin, ILimitedMinterBridge(address(limitedMinter)), feeCollector);
 
         // Grant roles
         token.grantRole(token.DEFAULT_ADMIN_ROLE(), externalTokenAdmin);
@@ -224,11 +225,12 @@ contract BridgeDepositTest is Test {
             address(token),
             recipient,
             amount,
+            0, // fee
             sourceChainId,
             sourceTxHash,
             sourceDepositId
         );
-        bridge.fulfillBridgeMint(address(token), recipient, amount, sourceChainId, sourceTxHash, sourceDepositId);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, 0, sourceChainId, sourceTxHash, sourceDepositId);
 
         assertEq(token.balances(recipient), amount);
         // Check fulfillment key (composite of chainId + txHash + depositId)
@@ -241,7 +243,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(user);
         vm.expectRevert();
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillAlreadyFulfilled() public {
@@ -249,11 +251,11 @@ contract BridgeDepositTest is Test {
         uint256 sourceDepositId = 1;
 
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, sourceDepositId);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, sourceDepositId);
 
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.BridgeAlreadyFulfilled.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, sourceDepositId);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, sourceDepositId);
     }
 
     function test_RevertWhen_FulfillTokenNotInMinter() public {
@@ -263,7 +265,7 @@ contract BridgeDepositTest is Test {
         // Token not registered in LimitedMinterBridge - should revert
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.TokenNotRegisteredInMinter.selector);
-        bridge.fulfillBridgeMint(address(unregisteredToken), recipient, 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(unregisteredToken), recipient, 100 ether, 0, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillZeroAmount() public {
@@ -271,7 +273,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.AmountZero.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 0, 0, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillZeroRecipient() public {
@@ -279,7 +281,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.InvalidRecipient.selector);
-        bridge.fulfillBridgeMint(address(token), address(0), 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), address(0), 100 ether, 0, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillWhilePaused() public {
@@ -289,23 +291,23 @@ contract BridgeDepositTest is Test {
         bytes32 sourceTxHash = keccak256("tx-hash");
         vm.prank(bridgeOperator);
         vm.expectRevert(bytes4(keccak256("EnforcedPause()")));
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
     }
 
     function testFulfillRespectsLimitedMinterDailyLimit() public {
         // Mint up to the daily limit
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 0, 1, keccak256("tx-1"), 1);
 
         // Try to mint more - should fail due to daily limit
         vm.prank(bridgeOperator);
         vm.expectRevert(LimitedMinterBridge.ExceedsDailyMintLimit.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 1 ether, 1, keccak256("tx-2"), 2);
+        bridge.fulfillBridgeMint(address(token), recipient, 1 ether, 0, 1, keccak256("tx-2"), 2);
 
         // Next day should work
         vm.warp(block.timestamp + 1 days);
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 1000 ether, 1, keccak256("tx-3"), 3);
+        bridge.fulfillBridgeMint(address(token), recipient, 1000 ether, 0, 1, keccak256("tx-3"), 3);
     }
 
     // -------------------------------------------------------------------------
@@ -384,7 +386,7 @@ contract BridgeDepositTest is Test {
 
         // After minting some
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 3000 ether, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 3000 ether, 0, 1, keccak256("tx-1"), 1);
 
         (remaining, dailyMax, mintedToday) = bridge.remainingMintCapacity(address(token));
         assertEq(remaining, DAILY_LIMIT - 3000 ether);
@@ -394,7 +396,7 @@ contract BridgeDepositTest is Test {
 
     function testRemainingMintCapacityAfterDayReset() public {
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 0, 1, keccak256("tx-1"), 1);
 
         (uint256 remaining,,) = bridge.remainingMintCapacity(address(token));
         assertEq(remaining, 0);
@@ -415,7 +417,7 @@ contract BridgeDepositTest is Test {
         // Try to fulfill with current chain as source chain
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.InvalidSourceChain.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, block.chainid, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, block.chainid, sourceTxHash, 1);
     }
 
     // -------------------------------------------------------------------------
@@ -427,15 +429,15 @@ contract BridgeDepositTest is Test {
 
         // Fulfill from chain 1, deposit 1
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
 
         // Fulfill from chain 1, deposit 2 (same tx, different deposit)
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 2);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 2);
 
         // Fulfill from chain 2, deposit 1 (different chain)
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 2, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 2, sourceTxHash, 1);
 
         assertEq(token.balances(recipient), 300 ether);
     }
@@ -445,12 +447,12 @@ contract BridgeDepositTest is Test {
 
         // First fulfill
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
 
         // Attempt duplicate - same chain, same tx, same deposit
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.BridgeAlreadyFulfilled.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
     }
 
     // -------------------------------------------------------------------------
@@ -498,7 +500,7 @@ contract BridgeDepositTest is Test {
         // Simulate tokens accidentally sent to bridge contract
         // Use bridgeOperator to fulfill a mint to the bridge address (simulating accidental send)
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), address(bridge), 500 ether, 1, keccak256("rescue-test"), 1);
+        bridge.fulfillBridgeMint(address(token), address(bridge), 500 ether, 0, 1, keccak256("rescue-test"), 1);
 
         uint256 bridgeBalanceBefore = token.balances(address(bridge));
         assertEq(bridgeBalanceBefore, 500 ether);
@@ -561,7 +563,7 @@ contract BridgeDepositTest is Test {
 
         // Fulfill bridge mint
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, sourceChainId, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, 0, sourceChainId, keccak256("tx-1"), 1);
 
         // Verify totalMintedFrom incremented
         (, uint256 mintedAfter) = bridge.getBridgeStats(address(token), sourceChainId);
@@ -585,8 +587,8 @@ contract BridgeDepositTest is Test {
 
         // Multiple fulfillments from same source chain
         vm.startPrank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount1, 1, keccak256("tx-1"), 1);
-        bridge.fulfillBridgeMint(address(token), recipient, amount2, 1, keccak256("tx-2"), 2);
+        bridge.fulfillBridgeMint(address(token), recipient, amount1, 0, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount2, 0, 1, keccak256("tx-2"), 2);
         vm.stopPrank();
 
         (, uint256 minted) = bridge.getBridgeStats(address(token), 1);
@@ -598,11 +600,11 @@ contract BridgeDepositTest is Test {
 
         // Fulfill from chain 1
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, 0, 1, keccak256("tx-1"), 1);
 
         // Fulfill from chain 2
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount * 2, 2, keccak256("tx-2"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount * 2, 0, 2, keccak256("tx-2"), 1);
 
         // Verify per-chain isolation
         (, uint256 mintedFromChain1) = bridge.getBridgeStats(address(token), 1);
@@ -610,5 +612,137 @@ contract BridgeDepositTest is Test {
 
         assertEq(mintedFromChain1, amount);
         assertEq(mintedFromChain2, amount * 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Fee handling tests
+    // -------------------------------------------------------------------------
+
+    function testFulfillBridgeMintWithFee() public {
+        uint256 amount = 500 ether;
+        uint256 fee = 5 ether;
+        uint256 sourceChainId = 1;
+        bytes32 sourceTxHash = keccak256("tx-with-fee");
+        uint256 sourceDepositId = 1;
+
+        vm.prank(bridgeOperator);
+        vm.expectEmit(true, true, true, true);
+        emit BridgeDeposit.BridgeMintFulfilled(
+            address(token),
+            recipient,
+            amount - fee, // recipientAmount
+            fee,
+            sourceChainId,
+            sourceTxHash,
+            sourceDepositId
+        );
+        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, sourceChainId, sourceTxHash, sourceDepositId);
+
+        // Recipient gets amount - fee
+        assertEq(token.balances(recipient), amount - fee);
+        // Fee collector gets fee
+        assertEq(token.balances(feeCollector), fee);
+    }
+
+    function testFulfillBridgeMintWithZeroFee() public {
+        uint256 amount = 500 ether;
+        uint256 fee = 0;
+
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-no-fee"), 1);
+
+        // Recipient gets full amount
+        assertEq(token.balances(recipient), amount);
+        // Fee collector gets nothing
+        assertEq(token.balances(feeCollector), 0);
+    }
+
+    function testFulfillBridgeMintFeeWithNoFeeCollector() public {
+        // Deploy new bridge without fee collector
+        BridgeDeposit bridgeNoFeeCollector = new BridgeDeposit(
+            admin,
+            ILimitedMinterBridge(address(limitedMinter)),
+            address(0) // no fee collector
+        );
+
+        // Grant MINTER_ROLE to the new bridge and bridge operator role
+        vm.startPrank(admin);
+        limitedMinter.grantRole(limitedMinter.MINTER_ROLE(), address(bridgeNoFeeCollector));
+        bridgeNoFeeCollector.grantRole(bridgeNoFeeCollector.BRIDGE_OPERATOR_ROLE(), bridgeOperator);
+        vm.stopPrank();
+
+        uint256 amount = 500 ether;
+        uint256 fee = 5 ether;
+
+        // When feeCollector is address(0), fee is not minted (burned/lost)
+        vm.prank(bridgeOperator);
+        bridgeNoFeeCollector.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-1"), 1);
+
+        // Recipient gets amount - fee
+        assertEq(token.balances(recipient), amount - fee);
+        // No tokens minted to zero address (fee is effectively burned)
+    }
+
+    function test_RevertWhen_FeeExceedsAmount() public {
+        uint256 amount = 100 ether;
+        uint256 fee = 101 ether; // fee > amount
+
+        vm.prank(bridgeOperator);
+        vm.expectRevert(BridgeDeposit.FeeExceedsAmount.selector);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-1"), 1);
+    }
+
+    function testFulfillBridgeMintWithFullAmountAsFee() public {
+        uint256 amount = 100 ether;
+        uint256 fee = 100 ether; // fee == amount
+
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-full-fee"), 1);
+
+        // Recipient gets nothing
+        assertEq(token.balances(recipient), 0);
+        // Fee collector gets full amount
+        assertEq(token.balances(feeCollector), amount);
+    }
+
+    function testConservationStatsIncludesFee() public {
+        uint256 amount = 500 ether;
+        uint256 fee = 50 ether;
+        uint256 sourceChainId = 1;
+
+        vm.prank(bridgeOperator);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, sourceChainId, keccak256("tx-1"), 1);
+
+        // Conservation stats should track full amount (including fee)
+        (, uint256 minted) = bridge.getBridgeStats(address(token), sourceChainId);
+        assertEq(minted, amount);
+    }
+
+    function testSetFeeCollector() public {
+        address newFeeCollector = address(0x123);
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, false);
+        emit BridgeDeposit.FeeCollectorUpdated(feeCollector, newFeeCollector);
+        bridge.setFeeCollector(newFeeCollector);
+
+        assertEq(bridge.feeCollector(), newFeeCollector);
+    }
+
+    function testSetFeeCollectorToZero() public {
+        vm.prank(admin);
+        bridge.setFeeCollector(address(0));
+
+        assertEq(bridge.feeCollector(), address(0));
+    }
+
+    function test_RevertWhen_SetFeeCollectorByNonAdmin() public {
+        vm.prank(user);
+        vm.expectRevert();
+        bridge.setFeeCollector(address(0x123));
+    }
+
+    function testFeeCollectorSetInConstructor() public {
+        assertEq(bridge.feeCollector(), feeCollector);
     }
 }
