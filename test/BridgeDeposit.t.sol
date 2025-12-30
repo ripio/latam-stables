@@ -674,13 +674,12 @@ contract BridgeDepositTest is Test {
         uint256 amount = 500 ether;
         uint256 fee = 5 ether;
 
-        // When feeCollector is address(0), fee is not minted (burned/lost)
+        // When feeCollector is address(0), fee is minted to recipient to maintain conservation
         vm.prank(bridgeOperator);
         bridgeNoFeeCollector.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-1"), 1);
 
-        // Recipient gets amount - fee
-        assertEq(token.balances(recipient), amount - fee);
-        // No tokens minted to zero address (fee is effectively burned)
+        // Recipient gets full amount (recipientAmount + fee) since no feeCollector
+        assertEq(token.balances(recipient), amount);
     }
 
     function test_RevertWhen_FeeExceedsAmount() public {

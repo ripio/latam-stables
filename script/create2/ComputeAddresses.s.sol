@@ -4,7 +4,7 @@ pragma solidity ^0.8.27;
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {LimitedMinterBridge} from "../../src/LimitedMinterBridge.sol";
-import {BridgeDeposit, ILimitedMinterBridge} from "../../src/BridgeDeposit.sol";
+import {BridgeDeposit} from "../../src/BridgeDeposit.sol";
 
 /**
  * @title ComputeAddresses
@@ -12,10 +12,11 @@ import {BridgeDeposit, ILimitedMinterBridge} from "../../src/BridgeDeposit.sol";
  *         without deploying. Use this to verify addresses before deployment.
  * @dev
  *  - Run this on any chain to compute addresses (no transaction needed).
- *  - Addresses will be the same on all chains if using the same admin and salts.
+ *  - Addresses will be the same on all chains if using the same admin, feeCollector, and salts.
  *
  * Environment variables:
  *  - BRIDGE_ADMIN: Admin address (must be same on all chains)
+ *  - FEE_COLLECTOR: Address that receives bridge fees (must be same on all chains, can be 0x0)
  *  - SALT_LIMITED_MINTER: bytes32 salt for LimitedMinterBridge (optional, default: 0x01)
  *  - SALT_BRIDGE_DEPOSIT: bytes32 salt for BridgeDeposit (optional, default: 0x02)
  */
@@ -26,6 +27,7 @@ contract ComputeAddresses is Script {
     function run() public view {
         // Load environment variables
         address admin = vm.envAddress("BRIDGE_ADMIN");
+        address feeCollector = vm.envOr("FEE_COLLECTOR", address(0));
         bytes32 saltLimitedMinter = vm.envOr("SALT_LIMITED_MINTER", bytes32(uint256(1)));
         bytes32 saltBridgeDeposit = vm.envOr("SALT_BRIDGE_DEPOSIT", bytes32(uint256(2)));
 
@@ -43,10 +45,10 @@ contract ComputeAddresses is Script {
         );
 
         // Compute BridgeDeposit address using computed LimitedMinterBridge address
-        // Constructor: (address admin, ILimitedMinterBridge _limitedMinter)
+        // Constructor: (address admin, ILimitedMinterBridge _limitedMinter, address _feeCollector)
         bytes memory bridgeDepositBytecode = abi.encodePacked(
             type(BridgeDeposit).creationCode,
-            abi.encode(admin, limitedMinterAddress)
+            abi.encode(admin, limitedMinterAddress, feeCollector)
         );
 
         address bridgeDepositAddress = _computeCreate2Addr(
@@ -60,6 +62,7 @@ contract ComputeAddresses is Script {
         console2.log("================================");
         console2.log("Factory:", ARACHNID_PROXY);
         console2.log("Admin:", admin);
+        console2.log("Fee Collector:", feeCollector);
         console2.log("Salt (LimitedMinterBridge):", vm.toString(saltLimitedMinter));
         console2.log("Salt (BridgeDeposit):", vm.toString(saltBridgeDeposit));
         console2.log("--------------------------------");
@@ -68,7 +71,7 @@ contract ComputeAddresses is Script {
         console2.log("================================");
         console2.log("");
         console2.log("These addresses will be the same on all chains if using");
-        console2.log("the same admin address and salt values.");
+        console2.log("the same admin, feeCollector, and salt values.");
         console2.log("================================");
     }
 

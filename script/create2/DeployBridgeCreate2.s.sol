@@ -4,7 +4,7 @@ pragma solidity ^0.8.27;
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {LimitedMinterBridge} from "../../src/LimitedMinterBridge.sol";
-import {BridgeDeposit, ILimitedMinterBridge} from "../../src/BridgeDeposit.sol";
+import {BridgeDeposit} from "../../src/BridgeDeposit.sol";
 
 /**
  * @title DeployBridgeCreate2
@@ -18,6 +18,7 @@ import {BridgeDeposit, ILimitedMinterBridge} from "../../src/BridgeDeposit.sol";
  *
  * Environment variables:
  *  - BRIDGE_ADMIN: Admin address (must be same on all chains)
+ *  - FEE_COLLECTOR: Address that receives bridge fees (must be same on all chains, can be 0x0)
  *  - SALT_LIMITED_MINTER: bytes32 salt for LimitedMinterBridge (optional, default: 0x01)
  *  - SALT_BRIDGE_DEPOSIT: bytes32 salt for BridgeDeposit (optional, default: 0x02)
  */
@@ -32,6 +33,7 @@ contract DeployBridgeCreate2 is Script {
     function run(address wallet) public returns (address limitedMinter, address bridgeDeposit) {
         // Load environment variables
         address admin = vm.envAddress("BRIDGE_ADMIN");
+        address feeCollector = vm.envOr("FEE_COLLECTOR", address(0));
         bytes32 saltLimitedMinter = vm.envOr("SALT_LIMITED_MINTER", bytes32(uint256(1)));
         bytes32 saltBridgeDeposit = vm.envOr("SALT_BRIDGE_DEPOSIT", bytes32(uint256(2)));
 
@@ -40,6 +42,7 @@ contract DeployBridgeCreate2 is Script {
         console2.log("================================");
         console2.log("Chain ID:", block.chainid);
         console2.log("Admin:", admin);
+        console2.log("Fee Collector:", feeCollector);
         console2.log("Deployer:", wallet);
         console2.log("Salt (LimitedMinterBridge):", vm.toString(saltLimitedMinter));
         console2.log("Salt (BridgeDeposit):", vm.toString(saltBridgeDeposit));
@@ -54,6 +57,7 @@ contract DeployBridgeCreate2 is Script {
         // Pre-compute addresses
         (address expectedLimitedMinter, address expectedBridgeDeposit) = computeAddresses(
             admin,
+            feeCollector,
             saltLimitedMinter,
             saltBridgeDeposit
         );
@@ -71,7 +75,7 @@ contract DeployBridgeCreate2 is Script {
         }
 
         // Deploy BridgeDeposit
-        bridgeDeposit = deployBridgeDeposit(admin, limitedMinter, saltBridgeDeposit);
+        bridgeDeposit = deployBridgeDeposit(admin, limitedMinter, feeCollector, saltBridgeDeposit);
         if (bridgeDeposit != expectedBridgeDeposit) {
             revert AddressMismatch("BridgeDeposit", expectedBridgeDeposit, bridgeDeposit);
         }
@@ -134,12 +138,13 @@ contract DeployBridgeCreate2 is Script {
     function deployBridgeDeposit(
         address admin,
         address limitedMinter,
+        address feeCollector,
         bytes32 salt
     ) internal returns (address deployed) {
         // Construct creation bytecode with constructor args
         bytes memory creationCode = abi.encodePacked(
             type(BridgeDeposit).creationCode,
-            abi.encode(admin, limitedMinter)
+            abi.encode(admin, limitedMinter, feeCollector)
         );
 
         // Check if already deployed
@@ -170,6 +175,7 @@ contract DeployBridgeCreate2 is Script {
     /**
      * @notice Computes deterministic addresses for both contracts
      * @param admin Admin address (same on all chains)
+     * @param feeCollector Fee collector address (same on all chains, can be address(0))
      * @param saltLimitedMinter Salt for LimitedMinterBridge
      * @param saltBridgeDeposit Salt for BridgeDeposit
      * @return limitedMinterAddr Computed LimitedMinterBridge address
@@ -177,6 +183,7 @@ contract DeployBridgeCreate2 is Script {
      */
     function computeAddresses(
         address admin,
+        address feeCollector,
         bytes32 saltLimitedMinter,
         bytes32 saltBridgeDeposit
     ) public pure returns (address limitedMinterAddr, address bridgeDepositAddr) {
@@ -190,7 +197,7 @@ contract DeployBridgeCreate2 is Script {
         // Compute BridgeDeposit address using computed LimitedMinterBridge address
         bytes memory bridgeDepositBytecode = abi.encodePacked(
             type(BridgeDeposit).creationCode,
-            abi.encode(admin, limitedMinterAddr)
+            abi.encode(admin, limitedMinterAddr, feeCollector)
         );
         bridgeDepositAddr = _computeCreate2Addr(saltBridgeDeposit, keccak256(bridgeDepositBytecode));
     }
