@@ -118,5 +118,24 @@ deploy-limited-minter-bridge:
 deploy-bridge-deposit:
 	@forge script script/DeployBridgeDeposit.s.sol:DeployBridgeDeposit $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
 
+# CREATE2 Deterministic Deployment Commands
+# These commands deploy LimitedMinterBridge and BridgeDeposit with the same addresses across all chains
+
+# Compute deterministic addresses without deploying (dry run)
+compute-bridge-addresses:
+	@forge script script/create2/ComputeAddresses.s.sol:ComputeAddresses --sig "run()"
+
+# Deploy both contracts via CREATE2 (same address on all chains)
+deploy-bridge-create2:
+	@forge script script/create2/DeployBridgeCreate2.s.sol:DeployBridgeCreate2 $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+# Grant MINTER_ROLE on LimitedMinterBridge to BridgeDeposit (post-deployment)
+grant-bridge-minter-role:
+	@forge script script/create2/GrantMinterRole.s.sol:GrantMinterRole $(NETWORK_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+# Verify deployment status on a chain
+verify-bridge-deployment:
+	@forge script script/create2/VerifyDeployment.s.sol:VerifyDeployment $(NETWORK_ARGS) --sig "run()"
+
 # cast wallet import --interactive key.json --keystore-dir keys
 # example command: make deploy-latam-stable ARGS="--network sepolia"

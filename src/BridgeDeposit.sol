@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface ILatamStableBurnable {
     function burnFrom(address account, uint256 amount) external;
@@ -32,14 +33,26 @@ interface ILimitedMinterBridge {
  *  - This contract itself must have MINTER_ROLE on LimitedMinterBridge in order to call `mintTo`.
  */
 contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
+    using SafeERC20 for IERC20;
+
     bytes32 public constant BRIDGE_OPERATOR_ROLE = keccak256("BRIDGE_OPERATOR_ROLE");
+    bytes32 public constant FEE_MANAGER_ROLE = keccak256("FEE_MANAGER_ROLE");
+
+    /// @notice Route configuration for outbound bridge deposits
+    struct RouteConfig {
+        bool enabled;
+        uint256 fixedFee;
+    }
 
     /// @notice LimitedMinterBridge instance used for minting on this chain
     ILimitedMinterBridge public limitedMinter;
 
-    /// @notice Outbound bridge routes: token => destChainId => enabled
-    /// @dev Controls which tokens can be deposited (burned) to which destination chains
-    mapping(address => mapping(uint256 => bool)) public bridgeRoutes;
+    /// @notice Address that receives bridge fees
+    address public feeCollector;
+
+    /// @notice Outbound bridge routes: token => destChainId => RouteConfig
+    /// @dev Controls which tokens can be deposited (burned) to which destination chains and their fees
+    mapping(address => mapping(uint256 => RouteConfig)) public routeConfigs;
 
     /// @notice Incremental ID for deposits initiated on this chain (local use / UI)
     uint256 public nextDepositId = 1;
@@ -51,6 +64,10 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /// @notice Total burned per token per destination chain (outbound)
     /// @dev Used for cross-chain conservation auditing
     mapping(address => mapping(uint256 => uint256)) public totalBurnedTo;
+
+    /// @notice Total fees collected per token per destination chain (outbound)
+    /// @dev Useful for accounting / treasury reconciliation
+    mapping(address => mapping(uint256 => uint256)) public totalFeesCollected;
 
     /// @notice Total minted per token per source chain (inbound)
     /// @dev Used for cross-chain conservation auditing
@@ -67,6 +84,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     error TokenNotRegisteredInMinter();
     error InvalidSourceChain();
     error InvalidRoute();
+    error AmountTooLowForFee();
 
     // -----------------------------------------------------------------------
     // Events
@@ -77,7 +95,8 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      * @param depositId Sequential deposit ID local to this contract
      * @param token Address of the token being bridged
      * @param from Address of the user who burned the tokens
-     * @param amount Amount burned
+     * @param amount Amount burned (excluding fee)
+     * @param fee Fee amount collected
      * @param destChainId Destination chain ID
      * @param destRecipient Recipient on the destination chain
      * @param clientDepositId Optional client-provided ID for off-chain correlation
@@ -87,6 +106,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         address indexed token,
         address indexed from,
         uint256 amount,
+        uint256 fee,
         uint256 destChainId,
         address destRecipient,
         bytes32 clientDepositId
@@ -96,7 +116,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      * @notice Emitted when a cross-chain bridge is fulfilled (mint) on this chain
      * @param token Address of the token being minted
      * @param to Recipient on this chain
-     * @param amount Amount minted
+     * @param amount Amount minted to recipient
      * @param sourceChainId Chain ID where the original burn/deposit occurred
      * @param sourceTxHash Transaction hash of the source-chain deposit (for auditability)
      * @param sourceDepositId Deposit ID from the source chain's BridgeDepositInitiated event
@@ -111,13 +131,19 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     );
 
     /// @notice Emitted when outbound bridge routes are updated
-    event BridgeRoutesUpdated(address indexed token, uint256[] destChainIds, bool enabled);
+    event BridgeRoutesUpdated(address indexed token, uint256[] destChainIds, bool enabled, uint256 fixedFee);
 
     /// @notice Emitted when LimitedMinterBridge reference is updated
     event LimitedMinterUpdated(address indexed oldMinter, address indexed newMinter);
 
     /// @notice Emitted when tokens are rescued from the contract
     event TokensRescued(address indexed token, address indexed to, uint256 amount);
+
+    /// @notice Emitted when the fee collector address is updated
+    event FeeCollectorUpdated(address indexed oldFeeCollector, address indexed newFeeCollector);
+
+    /// @notice Emitted when a route's fixed fee is updated
+    event RouteFeeUpdated(address indexed token, uint256 indexed destChainId, uint256 oldFee, uint256 newFee);
 
     // -----------------------------------------------------------------------
     // Constructor
@@ -126,16 +152,19 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
     /**
      * @param admin Address that receives DEFAULT_ADMIN_ROLE and BRIDGE_OPERATOR_ROLE
      * @param _limitedMinter Address of the LimitedMinterBridge contract on this chain
+     * @param _feeCollector Address that receives bridge fees (can be address(0) if no fees)
      */
-    constructor(address admin, ILimitedMinterBridge _limitedMinter) {
+    constructor(address admin, ILimitedMinterBridge _limitedMinter, address _feeCollector) {
         if (admin == address(0) || address(_limitedMinter) == address(0)) {
             revert ZeroAddress();
         }
 
         limitedMinter = _limitedMinter;
+        feeCollector = _feeCollector;
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BRIDGE_OPERATOR_ROLE, admin);
+        _grantRole(FEE_MANAGER_ROLE, admin);
     }
 
     // -----------------------------------------------------------------------
@@ -150,14 +179,6 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         _;
     }
 
-    /// @notice For outbound deposits - checks if route is enabled
-    modifier onlyValidRoute(address token, uint256 destChainId) {
-        if (!bridgeRoutes[token][destChainId]) {
-            revert InvalidRoute();
-        }
-        _;
-    }
-
     // -----------------------------------------------------------------------
     // Admin functions
     // -----------------------------------------------------------------------
@@ -169,21 +190,26 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      * @param token Token address
      * @param destChainIds Array of destination chain IDs to enable/disable
      * @param enabled Whether to enable or disable these routes
+     * @param fixedFee Fixed fee amount to charge for deposits on these routes
      */
     function setBridgeRoutes(
         address token,
         uint256[] calldata destChainIds,
-        bool enabled
+        bool enabled,
+        uint256 fixedFee
     ) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (token == address(0)) revert ZeroAddress();
 
         for (uint256 i = 0; i < destChainIds.length; ) {
             if (destChainIds[i] == block.chainid) revert InvalidSourceChain();
-            bridgeRoutes[token][destChainIds[i]] = enabled;
+            routeConfigs[token][destChainIds[i]] = RouteConfig({
+                enabled: enabled,
+                fixedFee: fixedFee
+            });
             unchecked { ++i; }
         }
 
-        emit BridgeRoutesUpdated(token, destChainIds, enabled);
+        emit BridgeRoutesUpdated(token, destChainIds, enabled, fixedFee);
     }
 
     /**
@@ -225,8 +251,40 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert AmountZero();
 
-        IERC20(token).transfer(to, amount);
+        IERC20(token).safeTransfer(to, amount);
         emit TokensRescued(token, to, amount);
+    }
+
+    /**
+     * @notice Updates the fee collector address
+     * @dev Only callable by admin. Can be set to address(0) to disable fee collection.
+     * @param newFeeCollector New fee collector address
+     */
+    function setFeeCollector(address newFeeCollector) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        address oldFeeCollector = feeCollector;
+        feeCollector = newFeeCollector;
+        emit FeeCollectorUpdated(oldFeeCollector, newFeeCollector);
+    }
+
+    /**
+     * @notice Updates the fixed fee for a specific route
+     * @dev Only callable by FEE_MANAGER_ROLE. Route must already exist (be enabled).
+     * @param token Token address
+     * @param destChainId Destination chain ID
+     * @param newFixedFee New fixed fee amount
+     */
+    function updateRouteFee(
+        address token,
+        uint256 destChainId,
+        uint256 newFixedFee
+    ) external onlyRole(FEE_MANAGER_ROLE) {
+        RouteConfig storage route = routeConfigs[token][destChainId];
+        if (!route.enabled) revert InvalidRoute();
+
+        uint256 oldFee = route.fixedFee;
+        route.fixedFee = newFixedFee;
+
+        emit RouteFeeUpdated(token, destChainId, oldFee, newFixedFee);
     }
 
     // -----------------------------------------------------------------------
@@ -237,11 +295,11 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      * @notice User burns tokens on this chain to initiate a cross-chain bridge
      * @dev
      *  - User must have approved this contract for at least `amount`.
-     *  - This contract calls `burnFrom(msg.sender, amount)` on the token.
+     *  - If the route has a fixed fee, fee is transferred to feeCollector and the rest is burned.
      *  - Emits `BridgeDepositInitiated` that off-chain infra uses to mint on destination chain.
      *
      * @param token Address of the token to bridge
-     * @param amount Amount to bridge (burn)
+     * @param amount Total amount (including fee) - fee will be deducted before burning
      * @param destChainId Destination chain ID
      * @param destRecipient Recipient address on the destination chain
      * @param clientDepositId Optional client-provided ID for correlation (e.g. from frontend)
@@ -257,24 +315,41 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
         external
         nonReentrant
         whenNotPaused
-        onlyValidRoute(token, destChainId)
         returns (uint256 depositId)
     {
         if (amount == 0) revert AmountZero();
         if (destRecipient == address(0)) revert InvalidRecipient();
+        if (destChainId == block.chainid) revert InvalidSourceChain();
 
-        // Burn tokens from the user using allowance
-        ILatamStableBurnable(token).burnFrom(msg.sender, amount);
+        // Get route config (replaces onlyValidRoute modifier)
+        RouteConfig memory route = routeConfigs[token][destChainId];
+        if (!route.enabled) revert InvalidRoute();
+
+        // Check fee
+        if (route.fixedFee >= amount) revert AmountTooLowForFee();
+
+        uint256 amountToBurn = amount - route.fixedFee;
+
+        // Transfer fee to feeCollector
+        if (route.fixedFee > 0) {
+            if (feeCollector == address(0)) revert ZeroAddress();
+            IERC20(token).safeTransferFrom(msg.sender, feeCollector, route.fixedFee);
+            totalFeesCollected[token][destChainId] += route.fixedFee;
+        }
+
+        // Burn the rest
+        ILatamStableBurnable(token).burnFrom(msg.sender, amountToBurn);
 
         // Track total burned for conservation auditing
-        totalBurnedTo[token][destChainId] += amount;
+        totalBurnedTo[token][destChainId] += amountToBurn;
 
         depositId = nextDepositId++;
         emit BridgeDepositInitiated(
             depositId,
             token,
             msg.sender,
-            amount,
+            amountToBurn,
+            route.fixedFee,
             destChainId,
             destRecipient,
             clientDepositId
@@ -296,7 +371,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
      *
      *  @param token Address of the token to mint
      *  @param to Recipient on this chain
-     *  @param amount Amount to mint
+     *  @param amount Amount to mint (should match burned amount from source chain)
      *  @param sourceChainId Chain ID of the source chain where the deposit occurred
      *  @param sourceTxHash Transaction hash of the source chain deposit (for auditability)
      *  @param sourceDepositId The depositId from BridgeDepositInitiated event on source chain
@@ -329,7 +404,7 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
 
         bridgeFulfilled[fulfillmentKey] = true;
 
-        // Mint via LimitedMinterBridge (enforces per-day limits)
+        // Mint to recipient via LimitedMinterBridge (enforces per-day limits)
         limitedMinter.mintTo(token, to, amount);
 
         // Track total minted for conservation auditing
