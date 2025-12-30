@@ -45,8 +45,21 @@ contract MockBurnableToken {
         return true;
     }
 
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(allowances[from][msg.sender] >= amount, "Insufficient allowance");
+        require(balances[from] >= amount, "Insufficient balance");
+        allowances[from][msg.sender] -= amount;
+        balances[from] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+
     function grantRole(bytes32 role, address account) external {
         roles[account][role] = true;
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return balances[account];
     }
 }
 
@@ -61,9 +74,11 @@ contract BridgeDepositTest is Test {
     address public user = address(0xD);
     address public recipient = address(0xE);
     address public feeCollector = address(0xF);
+    address public feeManager = address(0x1A);
 
     uint256 public constant DAILY_LIMIT = 10000 ether;
     uint256 public constant DEST_CHAIN_ID = 137;
+    uint256 public constant DEFAULT_FEE = 1 ether;
 
     function setUp() public {
         // Deploy mock token
@@ -86,20 +101,25 @@ contract BridgeDepositTest is Test {
         // Get role hashes before pranking
         bytes32 minterRole = limitedMinter.MINTER_ROLE();
         bytes32 bridgeOperatorRole = bridge.BRIDGE_OPERATOR_ROLE();
+        bytes32 feeManagerRole = bridge.FEE_MANAGER_ROLE();
 
         // Grant MINTER_ROLE on LimitedMinterBridge to BridgeDeposit
         vm.prank(admin);
         limitedMinter.grantRole(minterRole, address(bridge));
 
-        // Add outbound bridge route for token to DEST_CHAIN_ID
+        // Add outbound bridge route for token to DEST_CHAIN_ID with no fee
         uint256[] memory destChains = new uint256[](1);
         destChains[0] = DEST_CHAIN_ID;
         vm.prank(admin);
-        bridge.setBridgeRoutes(address(token), destChains, true);
+        bridge.setBridgeRoutes(address(token), destChains, true, 0);
 
         // Grant bridge operator role
         vm.prank(admin);
         bridge.grantRole(bridgeOperatorRole, bridgeOperator);
+
+        // Grant fee manager role
+        vm.prank(admin);
+        bridge.grantRole(feeManagerRole, feeManager);
 
         // Mint some tokens to user for deposit tests
         // We need to use the limitedMinter to mint (since it has MINTER_ROLE on token)
@@ -128,7 +148,8 @@ contract BridgeDepositTest is Test {
             1, // depositId
             address(token),
             user,
-            amount,
+            amount, // amountToBurn (no fee)
+            0, // fee
             DEST_CHAIN_ID,
             recipient,
             clientId
@@ -209,6 +230,164 @@ contract BridgeDepositTest is Test {
         vm.stopPrank();
     }
 
+    function test_RevertWhen_DepositToSameChain() public {
+        // Even if route was somehow enabled for same chain, deposit should revert
+        vm.startPrank(user);
+        token.approve(address(bridge), 100 ether);
+        vm.expectRevert(BridgeDeposit.InvalidSourceChain.selector);
+        bridge.depositForBridge(address(token), 100 ether, block.chainid, recipient, bytes32(0));
+        vm.stopPrank();
+    }
+
+    // -------------------------------------------------------------------------
+    // Deposit with fixed fee tests
+    // -------------------------------------------------------------------------
+
+    function testDepositForBridgeWithFixedFee() public {
+        uint256 fixedFee = 2 ether;
+        uint256 amount = 100 ether;
+        uint256 expectedBurn = amount - fixedFee;
+
+        // Set route with fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), destChains, true, fixedFee);
+
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+
+        vm.expectEmit(true, true, true, true);
+        emit BridgeDeposit.BridgeDepositInitiated(
+            1,
+            address(token),
+            user,
+            expectedBurn,
+            fixedFee,
+            DEST_CHAIN_ID,
+            recipient,
+            bytes32(0)
+        );
+
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // User balance decreased by full amount
+        assertEq(token.balances(user), 10000 ether - amount);
+        // Fee collector received the fee
+        assertEq(token.balances(feeCollector), fixedFee);
+        // Token total supply decreased by burned amount only
+        assertEq(token.totalSupply(), 10000 ether - expectedBurn);
+    }
+
+    function testDepositFeeTracking() public {
+        uint256 fixedFee = 2 ether;
+        uint256 amount = 100 ether;
+
+        // Set route with fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), destChains, true, fixedFee);
+
+        // Make deposit
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // Check fee tracking
+        assertEq(bridge.totalFeesCollected(address(token), DEST_CHAIN_ID), fixedFee);
+
+        // Make another deposit
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // Fees should accumulate
+        assertEq(bridge.totalFeesCollected(address(token), DEST_CHAIN_ID), fixedFee * 2);
+    }
+
+    function test_RevertWhen_AmountTooLowForFee() public {
+        uint256 fixedFee = 10 ether;
+        uint256 amount = 10 ether; // Equal to fee, should revert
+
+        // Set route with fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), destChains, true, fixedFee);
+
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        vm.expectRevert(BridgeDeposit.AmountTooLowForFee.selector);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_RevertWhen_AmountLessThanFee() public {
+        uint256 fixedFee = 10 ether;
+        uint256 amount = 5 ether; // Less than fee
+
+        // Set route with fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), destChains, true, fixedFee);
+
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        vm.expectRevert(BridgeDeposit.AmountTooLowForFee.selector);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function test_RevertWhen_FeeConfiguredButNoFeeCollector() public {
+        uint256 fixedFee = 2 ether;
+
+        // Deploy bridge without fee collector
+        BridgeDeposit bridgeNoCollector = new BridgeDeposit(
+            admin,
+            ILimitedMinterBridge(address(limitedMinter)),
+            address(0)
+        );
+
+        // Set route with fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridgeNoCollector.setBridgeRoutes(address(token), destChains, true, fixedFee);
+
+        // Should revert because fee > 0 but feeCollector is address(0)
+        vm.startPrank(user);
+        token.approve(address(bridgeNoCollector), 100 ether);
+        vm.expectRevert(BridgeDeposit.ZeroAddress.selector);
+        bridgeNoCollector.depositForBridge(address(token), 100 ether, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+    }
+
+    function testDepositWithZeroFeeAndNoFeeCollector() public {
+        // Deploy bridge without fee collector
+        BridgeDeposit bridgeNoCollector = new BridgeDeposit(
+            admin,
+            ILimitedMinterBridge(address(limitedMinter)),
+            address(0)
+        );
+
+        // Set route with zero fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridgeNoCollector.setBridgeRoutes(address(token), destChains, true, 0);
+
+        // Should work because fee is 0
+        vm.startPrank(user);
+        token.approve(address(bridgeNoCollector), 100 ether);
+        bridgeNoCollector.depositForBridge(address(token), 100 ether, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+    }
+
     // -------------------------------------------------------------------------
     // fulfillBridgeMint tests
     // -------------------------------------------------------------------------
@@ -225,12 +404,11 @@ contract BridgeDepositTest is Test {
             address(token),
             recipient,
             amount,
-            0, // fee
             sourceChainId,
             sourceTxHash,
             sourceDepositId
         );
-        bridge.fulfillBridgeMint(address(token), recipient, amount, 0, sourceChainId, sourceTxHash, sourceDepositId);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, sourceChainId, sourceTxHash, sourceDepositId);
 
         assertEq(token.balances(recipient), amount);
         // Check fulfillment key (composite of chainId + txHash + depositId)
@@ -243,7 +421,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(user);
         vm.expectRevert();
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillAlreadyFulfilled() public {
@@ -251,11 +429,11 @@ contract BridgeDepositTest is Test {
         uint256 sourceDepositId = 1;
 
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, sourceDepositId);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, sourceDepositId);
 
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.BridgeAlreadyFulfilled.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, sourceDepositId);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, sourceDepositId);
     }
 
     function test_RevertWhen_FulfillTokenNotInMinter() public {
@@ -265,7 +443,7 @@ contract BridgeDepositTest is Test {
         // Token not registered in LimitedMinterBridge - should revert
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.TokenNotRegisteredInMinter.selector);
-        bridge.fulfillBridgeMint(address(unregisteredToken), recipient, 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(unregisteredToken), recipient, 100 ether, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillZeroAmount() public {
@@ -273,7 +451,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.AmountZero.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 0, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 0, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillZeroRecipient() public {
@@ -281,7 +459,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.InvalidRecipient.selector);
-        bridge.fulfillBridgeMint(address(token), address(0), 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), address(0), 100 ether, 1, sourceTxHash, 1);
     }
 
     function test_RevertWhen_FulfillWhilePaused() public {
@@ -291,23 +469,23 @@ contract BridgeDepositTest is Test {
         bytes32 sourceTxHash = keccak256("tx-hash");
         vm.prank(bridgeOperator);
         vm.expectRevert(bytes4(keccak256("EnforcedPause()")));
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
     }
 
     function testFulfillRespectsLimitedMinterDailyLimit() public {
         // Mint up to the daily limit
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 0, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 1, keccak256("tx-1"), 1);
 
         // Try to mint more - should fail due to daily limit
         vm.prank(bridgeOperator);
         vm.expectRevert(LimitedMinterBridge.ExceedsDailyMintLimit.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 1 ether, 0, 1, keccak256("tx-2"), 2);
+        bridge.fulfillBridgeMint(address(token), recipient, 1 ether, 1, keccak256("tx-2"), 2);
 
         // Next day should work
         vm.warp(block.timestamp + 1 days);
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 1000 ether, 0, 1, keccak256("tx-3"), 3);
+        bridge.fulfillBridgeMint(address(token), recipient, 1000 ether, 1, keccak256("tx-3"), 3);
     }
 
     // -------------------------------------------------------------------------
@@ -321,10 +499,15 @@ contract BridgeDepositTest is Test {
         destChains[1] = 42161; // Arbitrum
         
         vm.prank(admin);
-        bridge.setBridgeRoutes(address(token), destChains, true);
+        bridge.setBridgeRoutes(address(token), destChains, true, 5 ether);
 
-        assertTrue(bridge.bridgeRoutes(address(token), 137));
-        assertTrue(bridge.bridgeRoutes(address(token), 42161));
+        (bool enabled1, uint256 fee1) = bridge.routeConfigs(address(token), 137);
+        (bool enabled2, uint256 fee2) = bridge.routeConfigs(address(token), 42161);
+
+        assertTrue(enabled1);
+        assertTrue(enabled2);
+        assertEq(fee1, 5 ether);
+        assertEq(fee2, 5 ether);
     }
 
     function testRemoveBridgeRoute() public {
@@ -332,9 +515,10 @@ contract BridgeDepositTest is Test {
         destChains[0] = DEST_CHAIN_ID;
         
         vm.prank(admin);
-        bridge.setBridgeRoutes(address(token), destChains, false);
+        bridge.setBridgeRoutes(address(token), destChains, false, 0);
 
-        assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
+        (bool enabled,) = bridge.routeConfigs(address(token), DEST_CHAIN_ID);
+        assertFalse(enabled);
     }
 
     function test_RevertWhen_SetRouteToSameChain() public {
@@ -343,7 +527,7 @@ contract BridgeDepositTest is Test {
 
         vm.prank(admin);
         vm.expectRevert(BridgeDeposit.InvalidSourceChain.selector);
-        bridge.setBridgeRoutes(address(token), destChains, true);
+        bridge.setBridgeRoutes(address(token), destChains, true, 0);
     }
 
     function testUpdateLimitedMinter() public {
@@ -374,6 +558,59 @@ contract BridgeDepositTest is Test {
     }
 
     // -------------------------------------------------------------------------
+    // updateRouteFee tests
+    // -------------------------------------------------------------------------
+
+    function testUpdateRouteFee() public {
+        uint256 newFee = 5 ether;
+
+        vm.prank(feeManager);
+        vm.expectEmit(true, true, false, true);
+        emit BridgeDeposit.RouteFeeUpdated(address(token), DEST_CHAIN_ID, 0, newFee);
+        bridge.updateRouteFee(address(token), DEST_CHAIN_ID, newFee);
+
+        (, uint256 fee) = bridge.routeConfigs(address(token), DEST_CHAIN_ID);
+        assertEq(fee, newFee);
+    }
+
+    function testUpdateRouteFeeByAdmin() public {
+        // Admin also has FEE_MANAGER_ROLE from constructor
+        uint256 newFee = 3 ether;
+
+        vm.prank(admin);
+        bridge.updateRouteFee(address(token), DEST_CHAIN_ID, newFee);
+
+        (, uint256 fee) = bridge.routeConfigs(address(token), DEST_CHAIN_ID);
+        assertEq(fee, newFee);
+    }
+
+    function test_RevertWhen_UpdateRouteFeeByNonFeeManager() public {
+        vm.prank(user);
+        vm.expectRevert();
+        bridge.updateRouteFee(address(token), DEST_CHAIN_ID, 5 ether);
+    }
+
+    function test_RevertWhen_UpdateRouteFeeForDisabledRoute() public {
+        // Disable the route first
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), destChains, false, 0);
+
+        // Try to update fee on disabled route
+        vm.prank(feeManager);
+        vm.expectRevert(BridgeDeposit.InvalidRoute.selector);
+        bridge.updateRouteFee(address(token), DEST_CHAIN_ID, 5 ether);
+    }
+
+    function test_RevertWhen_UpdateRouteFeeForNonexistentRoute() public {
+        // Route that was never created
+        vm.prank(feeManager);
+        vm.expectRevert(BridgeDeposit.InvalidRoute.selector);
+        bridge.updateRouteFee(address(token), 999, 5 ether);
+    }
+
+    // -------------------------------------------------------------------------
     // View function tests
     // -------------------------------------------------------------------------
 
@@ -386,7 +623,7 @@ contract BridgeDepositTest is Test {
 
         // After minting some
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 3000 ether, 0, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 3000 ether, 1, keccak256("tx-1"), 1);
 
         (remaining, dailyMax, mintedToday) = bridge.remainingMintCapacity(address(token));
         assertEq(remaining, DAILY_LIMIT - 3000 ether);
@@ -396,7 +633,7 @@ contract BridgeDepositTest is Test {
 
     function testRemainingMintCapacityAfterDayReset() public {
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 0, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, DAILY_LIMIT, 1, keccak256("tx-1"), 1);
 
         (uint256 remaining,,) = bridge.remainingMintCapacity(address(token));
         assertEq(remaining, 0);
@@ -417,7 +654,7 @@ contract BridgeDepositTest is Test {
         // Try to fulfill with current chain as source chain
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.InvalidSourceChain.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, block.chainid, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, block.chainid, sourceTxHash, 1);
     }
 
     // -------------------------------------------------------------------------
@@ -429,15 +666,15 @@ contract BridgeDepositTest is Test {
 
         // Fulfill from chain 1, deposit 1
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
 
         // Fulfill from chain 1, deposit 2 (same tx, different deposit)
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 2);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 2);
 
         // Fulfill from chain 2, deposit 1 (different chain)
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 2, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 2, sourceTxHash, 1);
 
         assertEq(token.balances(recipient), 300 ether);
     }
@@ -447,12 +684,12 @@ contract BridgeDepositTest is Test {
 
         // First fulfill
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
 
         // Attempt duplicate - same chain, same tx, same deposit
         vm.prank(bridgeOperator);
         vm.expectRevert(BridgeDeposit.BridgeAlreadyFulfilled.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 0, 1, sourceTxHash, 1);
+        bridge.fulfillBridgeMint(address(token), recipient, 100 ether, 1, sourceTxHash, 1);
     }
 
     // -------------------------------------------------------------------------
@@ -466,12 +703,16 @@ contract BridgeDepositTest is Test {
         moreChains[1] = 10;    // Optimism
         
         vm.prank(admin);
-        bridge.setBridgeRoutes(address(token), moreChains, true);
+        bridge.setBridgeRoutes(address(token), moreChains, true, 1 ether);
 
         // All routes should be enabled
-        assertTrue(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID)); // from setUp
-        assertTrue(bridge.bridgeRoutes(address(token), 42161));
-        assertTrue(bridge.bridgeRoutes(address(token), 10));
+        (bool enabled1,) = bridge.routeConfigs(address(token), DEST_CHAIN_ID);
+        (bool enabled2,) = bridge.routeConfigs(address(token), 42161);
+        (bool enabled3,) = bridge.routeConfigs(address(token), 10);
+
+        assertTrue(enabled1); // from setUp
+        assertTrue(enabled2);
+        assertTrue(enabled3);
     }
 
     function testDisableSpecificRoute() public {
@@ -479,17 +720,20 @@ contract BridgeDepositTest is Test {
         uint256[] memory extraChain = new uint256[](1);
         extraChain[0] = 42161;
         vm.prank(admin);
-        bridge.setBridgeRoutes(address(token), extraChain, true);
+        bridge.setBridgeRoutes(address(token), extraChain, true, 0);
 
         // Now disable just the original route
         uint256[] memory chainToDisable = new uint256[](1);
         chainToDisable[0] = DEST_CHAIN_ID;
         vm.prank(admin);
-        bridge.setBridgeRoutes(address(token), chainToDisable, false);
+        bridge.setBridgeRoutes(address(token), chainToDisable, false, 0);
 
         // Original route disabled, new route still enabled
-        assertFalse(bridge.bridgeRoutes(address(token), DEST_CHAIN_ID));
-        assertTrue(bridge.bridgeRoutes(address(token), 42161));
+        (bool enabled1,) = bridge.routeConfigs(address(token), DEST_CHAIN_ID);
+        (bool enabled2,) = bridge.routeConfigs(address(token), 42161);
+
+        assertFalse(enabled1);
+        assertTrue(enabled2);
     }
 
     // -------------------------------------------------------------------------
@@ -500,7 +744,7 @@ contract BridgeDepositTest is Test {
         // Simulate tokens accidentally sent to bridge contract
         // Use bridgeOperator to fulfill a mint to the bridge address (simulating accidental send)
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), address(bridge), 500 ether, 0, 1, keccak256("rescue-test"), 1);
+        bridge.fulfillBridgeMint(address(token), address(bridge), 500 ether, 1, keccak256("rescue-test"), 1);
 
         uint256 bridgeBalanceBefore = token.balances(address(bridge));
         assertEq(bridgeBalanceBefore, 500 ether);
@@ -553,6 +797,28 @@ contract BridgeDepositTest is Test {
         assertEq(burnedAfter, amount);
     }
 
+    function testTotalBurnedToWithFee() public {
+        uint256 fixedFee = 5 ether;
+        uint256 amount = 100 ether;
+        uint256 expectedBurn = amount - fixedFee;
+
+        // Set route with fee
+        uint256[] memory destChains = new uint256[](1);
+        destChains[0] = DEST_CHAIN_ID;
+        vm.prank(admin);
+        bridge.setBridgeRoutes(address(token), destChains, true, fixedFee);
+
+        // Make deposit
+        vm.startPrank(user);
+        token.approve(address(bridge), amount);
+        bridge.depositForBridge(address(token), amount, DEST_CHAIN_ID, recipient, bytes32(0));
+        vm.stopPrank();
+
+        // totalBurnedTo should only track burned amount, not fee
+        (uint256 burned,) = bridge.getBridgeStats(address(token), DEST_CHAIN_ID);
+        assertEq(burned, expectedBurn);
+    }
+
     function testTotalMintedFromAfterFulfill() public {
         uint256 amount = 500 ether;
         uint256 sourceChainId = 1;
@@ -563,7 +829,7 @@ contract BridgeDepositTest is Test {
 
         // Fulfill bridge mint
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, 0, sourceChainId, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, sourceChainId, keccak256("tx-1"), 1);
 
         // Verify totalMintedFrom incremented
         (, uint256 mintedAfter) = bridge.getBridgeStats(address(token), sourceChainId);
@@ -587,8 +853,8 @@ contract BridgeDepositTest is Test {
 
         // Multiple fulfillments from same source chain
         vm.startPrank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount1, 0, 1, keccak256("tx-1"), 1);
-        bridge.fulfillBridgeMint(address(token), recipient, amount2, 0, 1, keccak256("tx-2"), 2);
+        bridge.fulfillBridgeMint(address(token), recipient, amount1, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount2, 1, keccak256("tx-2"), 2);
         vm.stopPrank();
 
         (, uint256 minted) = bridge.getBridgeStats(address(token), 1);
@@ -600,11 +866,11 @@ contract BridgeDepositTest is Test {
 
         // Fulfill from chain 1
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, 0, 1, keccak256("tx-1"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount, 1, keccak256("tx-1"), 1);
 
         // Fulfill from chain 2
         vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount * 2, 0, 2, keccak256("tx-2"), 1);
+        bridge.fulfillBridgeMint(address(token), recipient, amount * 2, 2, keccak256("tx-2"), 1);
 
         // Verify per-chain isolation
         (, uint256 mintedFromChain1) = bridge.getBridgeStats(address(token), 1);
@@ -615,107 +881,8 @@ contract BridgeDepositTest is Test {
     }
 
     // -------------------------------------------------------------------------
-    // Fee handling tests
+    // Fee collector tests
     // -------------------------------------------------------------------------
-
-    function testFulfillBridgeMintWithFee() public {
-        uint256 amount = 500 ether;
-        uint256 fee = 5 ether;
-        uint256 sourceChainId = 1;
-        bytes32 sourceTxHash = keccak256("tx-with-fee");
-        uint256 sourceDepositId = 1;
-
-        vm.prank(bridgeOperator);
-        vm.expectEmit(true, true, true, true);
-        emit BridgeDeposit.BridgeMintFulfilled(
-            address(token),
-            recipient,
-            amount - fee, // recipientAmount
-            fee,
-            sourceChainId,
-            sourceTxHash,
-            sourceDepositId
-        );
-        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, sourceChainId, sourceTxHash, sourceDepositId);
-
-        // Recipient gets amount - fee
-        assertEq(token.balances(recipient), amount - fee);
-        // Fee collector gets fee
-        assertEq(token.balances(feeCollector), fee);
-    }
-
-    function testFulfillBridgeMintWithZeroFee() public {
-        uint256 amount = 500 ether;
-        uint256 fee = 0;
-
-        vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-no-fee"), 1);
-
-        // Recipient gets full amount
-        assertEq(token.balances(recipient), amount);
-        // Fee collector gets nothing
-        assertEq(token.balances(feeCollector), 0);
-    }
-
-    function testFulfillBridgeMintFeeWithNoFeeCollector() public {
-        // Deploy new bridge without fee collector
-        BridgeDeposit bridgeNoFeeCollector = new BridgeDeposit(
-            admin,
-            ILimitedMinterBridge(address(limitedMinter)),
-            address(0) // no fee collector
-        );
-
-        // Grant MINTER_ROLE to the new bridge and bridge operator role
-        vm.startPrank(admin);
-        limitedMinter.grantRole(limitedMinter.MINTER_ROLE(), address(bridgeNoFeeCollector));
-        bridgeNoFeeCollector.grantRole(bridgeNoFeeCollector.BRIDGE_OPERATOR_ROLE(), bridgeOperator);
-        vm.stopPrank();
-
-        uint256 amount = 500 ether;
-        uint256 fee = 5 ether;
-
-        // When feeCollector is address(0), fee is minted to recipient to maintain conservation
-        vm.prank(bridgeOperator);
-        bridgeNoFeeCollector.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-1"), 1);
-
-        // Recipient gets full amount (recipientAmount + fee) since no feeCollector
-        assertEq(token.balances(recipient), amount);
-    }
-
-    function test_RevertWhen_FeeExceedsAmount() public {
-        uint256 amount = 100 ether;
-        uint256 fee = 101 ether; // fee > amount
-
-        vm.prank(bridgeOperator);
-        vm.expectRevert(BridgeDeposit.FeeExceedsAmount.selector);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-1"), 1);
-    }
-
-    function testFulfillBridgeMintWithFullAmountAsFee() public {
-        uint256 amount = 100 ether;
-        uint256 fee = 100 ether; // fee == amount
-
-        vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, 1, keccak256("tx-full-fee"), 1);
-
-        // Recipient gets nothing
-        assertEq(token.balances(recipient), 0);
-        // Fee collector gets full amount
-        assertEq(token.balances(feeCollector), amount);
-    }
-
-    function testConservationStatsIncludesFee() public {
-        uint256 amount = 500 ether;
-        uint256 fee = 50 ether;
-        uint256 sourceChainId = 1;
-
-        vm.prank(bridgeOperator);
-        bridge.fulfillBridgeMint(address(token), recipient, amount, fee, sourceChainId, keccak256("tx-1"), 1);
-
-        // Conservation stats should track full amount (including fee)
-        (, uint256 minted) = bridge.getBridgeStats(address(token), sourceChainId);
-        assertEq(minted, amount);
-    }
 
     function testSetFeeCollector() public {
         address newFeeCollector = address(0x123);
@@ -743,5 +910,23 @@ contract BridgeDepositTest is Test {
 
     function testFeeCollectorSetInConstructor() public {
         assertEq(bridge.feeCollector(), feeCollector);
+    }
+
+    // -------------------------------------------------------------------------
+    // FEE_MANAGER_ROLE tests
+    // -------------------------------------------------------------------------
+
+    function testFeeManagerRoleGrantedToAdminInConstructor() public {
+        assertTrue(bridge.hasRole(bridge.FEE_MANAGER_ROLE(), admin));
+    }
+
+    function testGrantFeeManagerRole() public {
+        address newFeeManager = address(0x999);
+        bytes32 feeManagerRole = bridge.FEE_MANAGER_ROLE();
+
+        vm.prank(admin);
+        bridge.grantRole(feeManagerRole, newFeeManager);
+
+        assertTrue(bridge.hasRole(feeManagerRole, newFeeManager));
     }
 }
