@@ -362,9 +362,10 @@ contract BridgeDeposit is AccessControlEnumerable, ReentrancyGuard, Pausable {
             limitedMinter.mintTo(token, to, recipientAmount);
         }
 
-        // Mint fee to feeCollector if applicable
-        if (fee > 0 && feeCollector != address(0)) {
-            limitedMinter.mintTo(token, feeCollector, fee);
+        // Mint fee to feeCollector if applicable (or to recipient if no feeCollector to maintain conservation)
+        if (fee > 0) {
+            address feeRecipient = feeCollector != address(0) ? feeCollector : to;
+            limitedMinter.mintTo(token, feeRecipient, fee);
         }
 
         // Track total minted for conservation auditing (full amount including fee)
