@@ -4,6 +4,9 @@
 
 DEFAULT_ANVIL_KEY := 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
+TEMPO_RPC_URL ?= https://rpc.tempo.xyz
+MODERATO_RPC_URL ?= https://rpc.moderato.tempo.xyz
+
 help:
 	@echo "Usage:"
 	@echo "  make deploy [ARGS=...]"
@@ -84,6 +87,14 @@ else ifeq ($(findstring --network zkLatestnet,$(ARGS)),--network zkLatestnet)
 else ifeq ($(findstring --network base,$(ARGS)),--network base)
 	NETWORK_ARGS := --rpc-url $(BASE_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 2500000 
 	VERIFY_ARGS := --verify --chain-id 8453 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
+
+else ifeq ($(findstring --network tempo,$(ARGS)),--network tempo)
+	NETWORK_ARGS := --rpc-url $(TEMPO_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --chain-id 4217
+	VERIFY_ARGS :=
+
+else ifeq ($(findstring --network moderato,$(ARGS)),--network moderato)
+	NETWORK_ARGS := --rpc-url $(MODERATO_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --chain-id 42431
+	VERIFY_ARGS :=
 else
 	VERIFY_ARGS :=
 endif
@@ -105,6 +116,42 @@ endif
 # Deploy Latam Stable
 deploy-latam-stable:
 	@forge script script/DeployLatamStable.s.sol:DeployLatamStable $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+deploy-tip20-latam-stable:
+	@forge script script/DeployTip20LatamStable.s.sol:DeployTip20LatamStable $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+deploy-tip20-limited-minter:
+	@forge script script/DeployTip20LimitedMinter.s.sol:DeployTip20LimitedMinter $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+deploy-tip20-limited-minter-bridge:
+	@forge script script/DeployTip20LimitedMinterBridge.s.sol:DeployTip20LimitedMinterBridge $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+deploy-tip20-bridge-deposit:
+	@forge script script/DeployTip20BridgeDeposit.s.sol:DeployTip20BridgeDeposit $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+grant-tip20-roles:
+	@forge script script/GrantTip20Roles.s.sol:GrantTip20Roles $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+grant-tip20-bridge-minter-role:
+	@forge script script/GrantTip20BridgeMinterRole.s.sol:GrantTip20BridgeMinterRole $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+register-tip20-token:
+	@forge script script/RegisterTip20Token.s.sol:RegisterTip20Token $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+register-tip20-bridge-token:
+	@forge script script/RegisterTip20BridgeToken.s.sol:RegisterTip20BridgeToken $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+set-tip20-bridge-route:
+	@forge script script/SetTip20BridgeRoute.s.sol:SetTip20BridgeRoute $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+tip20-mint:
+	@forge script script/Tip20Mint.s.sol:Tip20Mint $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+tip20-deposit-for-bridge:
+	@forge script script/Tip20DepositForBridge.s.sol:Tip20DepositForBridge $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
+
+tip20-fulfill-bridge-mint:
+	@forge script script/Tip20FulfillBridgeMint.s.sol:Tip20FulfillBridgeMint $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)
 
 deploy-limited-minter:
 	@forge script script/DeployLimitedMinter.s.sol:DeployLimitedMinter $(NETWORK_ARGS) $(VERIFY_ARGS) --sig "run(address)" $(WALLET_ADDRESS)

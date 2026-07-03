@@ -109,6 +109,192 @@ make deploy-latam-stable ARGS="--network sepolia"
 
 This will run the deployment script using the parameters from your environment variables and print the deployed contract addresses and roles.
 
+## Tempo TIP-20 Deployment
+
+Tempo-native stablecoins should be created through the TIP-20 factory rather than by deploying `LatamStable` behind an ERC1967 proxy. The existing ERC1967 path remains available for non-Tempo networks.
+
+This path creates a native TIP-20 token. It does not deploy a custom `Tip20LatamStable.sol` token contract.
+
+### Deploy a native TIP-20 token
+
+Set environment variables:
+
+```env
+TOKEN_NAME=Colombian Peso
+TOKEN_SYMBOL=WCOP
+TOKEN_CURRENCY=COP
+QUOTE_TOKEN=0x20c0000000000000000000000000000000000000
+TIP20_ADMIN=0xAdminAddress
+TIP20_SALT=0x631063836fa5a002b22b7bd7ede381f53799ed51b75bda60adcce337f3c5d6b5
+TEMPO_RPC_URL=https://rpc.tempo.xyz
+MODERATO_RPC_URL=https://rpc.moderato.tempo.xyz
+# Optional: TOKEN_LOGO_URI=https://example.com/token.png
+```
+
+Deploy on Tempo mainnet:
+
+```bash
+make deploy-tip20-latam-stable ARGS="--network tempo"
+```
+
+Or deploy on Moderato testnet:
+
+```bash
+make deploy-tip20-latam-stable ARGS="--network moderato"
+```
+
+The deploy script calls `TIP20Factory.createToken(...)`, logs the deterministic token address from `getTokenAddress(deployer, salt)`, verifies `QUOTE_TOKEN` with `isTIP20`, checks whether the expected token already exists, and logs the quote token's currency before broadcasting.
+
+`TOKEN_CURRENCY` is the asset one unit of the token tracks, not the token symbol. For example, a COP-pegged token should use `COP`.
+
+### Tempo TIP-20 limited issuance
+
+Ripio's ERC-20 issuance flow uses `LimitedMinter` as a capped issuance control plane. The Tempo-native equivalent is `Tip20LimitedMinter`.
+
+The target sequence is:
+
+1. Deploy/create the native TIP-20 token.
+2. Deploy `Tip20LimitedMinter`.
+3. Grant the TIP-20 token's `ISSUER_ROLE` to `Tip20LimitedMinter`.
+4. Register the TIP-20 token in `Tip20LimitedMinter` with a mint destination and daily cap.
+5. Have the operator call `Tip20LimitedMinter.mint(...)` or `Tip20LimitedMinter.mintWithMemo(...)`, which calls the matching TIP-20 mint method.
+
+Deploy the limited minter:
+
+```bash
+DEFAULT_ADMIN=0xAdminAddress
+MINTER=0xMintOperator
+TOKEN_CONFIG_ADMIN=0xConfigAdmin
+make deploy-tip20-limited-minter ARGS="--network moderato"
+```
+
+Grant TIP-20 roles:
+
+```bash
+TIP20_TOKEN=0x20c...
+TIP20_ISSUER=0xTip20LimitedMinter
+TIP20_PAUSER=0xSecurityOps
+TIP20_UNPAUSER=0xSecurityOps
+TIP20_BURN_BLOCKED=0xRecoveryOps
+make grant-tip20-roles ARGS="--network moderato"
+```
+
+Register the token and mint through the control plane:
+
+```bash
+TIP20_LIMITED_MINTER=0xTip20LimitedMinter
+TIP20_TOKEN=0x20c...
+MINT_DESTINATION=0xTreasuryOrMintDestination
+DAILY_MAX_MINT=1000000000000
+make register-tip20-token ARGS="--network moderato"
+
+MINT_AMOUNT=1000000
+make tip20-mint ARGS="--network moderato"
+```
+
+`MINT_MEMO` is optional. If it is unset or zero, the script uses the no-memo `mint(token, amount)` path. If it is nonzero, the script uses `mintWithMemo(token, amount, memo)`.
+
+All TIP-20 amounts use TIP-20 units. Tempo TIP-20 tokens expose 6 decimals, while the current OZ ERC-20 path defaults to 18 decimals. Amount conversion must be handled explicitly in scripts and operational runbooks.
+
+TIP-20 does not expose OpenZeppelin-style role read helpers such as `hasRole`. The role grant script submits role changes and relies on the precompile to enforce authorization. Role membership should be tracked from TIP-20 role events or deployment manifests.
+
+### Tempo TIP-20 bridge support
+
+Ripio's ERC-20 bridge path uses `BridgeDeposit` and `LimitedMinterBridge`. The Tempo-native equivalent keeps the same operational model but uses separate TIP-20 contracts:
+
+1. `Tip20BridgeDeposit` on the source chain pulls approved TIP-20 tokens into the bridge contract, sends any fixed route fee, and burns the remainder with `burn(...)` or `burnWithMemo(...)`.
+2. The offchain bridge operator observes `BridgeDepositInitiated(...)`.
+3. `Tip20BridgeDeposit` on the destination chain calls `Tip20LimitedMinterBridge.mintTo(...)`.
+4. `Tip20LimitedMinterBridge` enforces the registered token's daily mint cap and mints to the final recipient with `mint(...)` or `mintWithMemo(...)`.
+5. `Tip20BridgeDeposit` tracks replay protection with `(sourceChainId, sourceTxHash, sourceDepositId)` and updates burn/mint accounting.
+
+Deploy the bridge minter:
+
+```bash
+DEFAULT_ADMIN=0xAdminAddress
+MINTER=0xAdminOrTemporaryMinter
+TOKEN_CONFIG_ADMIN=0xConfigAdmin
+make deploy-tip20-limited-minter-bridge ARGS="--network moderato"
+```
+
+Deploy the bridge deposit contract:
+
+```bash
+BRIDGE_ADMIN=0xBridgeAdmin
+TIP20_LIMITED_MINTER_BRIDGE=0xTip20LimitedMinterBridge
+FEE_COLLECTOR=0xFeeCollector
+make deploy-tip20-bridge-deposit ARGS="--network moderato"
+```
+
+Grant the local bridge mint role:
+
+```bash
+TIP20_LIMITED_MINTER_BRIDGE=0xTip20LimitedMinterBridge
+TIP20_BRIDGE_DEPOSIT=0xTip20BridgeDeposit
+make grant-tip20-bridge-minter-role ARGS="--network moderato"
+```
+
+Grant TIP-20 issuer authority:
+
+```bash
+TIP20_TOKEN=0x20c...
+TIP20_ISSUER=0xTip20LimitedMinterBridge
+make grant-tip20-roles ARGS="--network moderato"
+
+TIP20_TOKEN=0x20c...
+TIP20_ISSUER=0xTip20BridgeDeposit
+make grant-tip20-roles ARGS="--network moderato"
+```
+
+`Tip20LimitedMinterBridge` needs `ISSUER_ROLE` to mint on the destination chain. `Tip20BridgeDeposit` needs `ISSUER_ROLE` only on chains where it burns Tempo-native balances for outbound bridge deposits.
+
+Register the token in the bridge minter and configure an outbound route:
+
+```bash
+TIP20_LIMITED_MINTER_BRIDGE=0xTip20LimitedMinterBridge
+TIP20_TOKEN=0x20c...
+DAILY_MAX_MINT=1000000000000
+make register-tip20-bridge-token ARGS="--network moderato"
+
+TIP20_BRIDGE_DEPOSIT=0xTip20BridgeDeposit
+TIP20_TOKEN=0x20c...
+DEST_CHAIN_ID=4217
+ROUTE_ENABLED=true
+FIXED_FEE=0
+make set-tip20-bridge-route ARGS="--network moderato"
+```
+
+User deposit flow:
+
+```bash
+# User must approve Tip20BridgeDeposit for BRIDGE_AMOUNT first.
+TIP20_BRIDGE_DEPOSIT=0xTip20BridgeDeposit
+TIP20_TOKEN=0x20c...
+BRIDGE_AMOUNT=1000000
+DEST_CHAIN_ID=4217
+DEST_RECIPIENT=0xRecipient
+make tip20-deposit-for-bridge ARGS="--network moderato"
+```
+
+`CLIENT_DEPOSIT_ID` is optional. If it is unset or zero, the script uses the no-memo `depositForBridge(...)` path and plain TIP-20 `burn(...)`. If it is nonzero, the script uses `depositForBridgeWithMemo(...)` and TIP-20 `burnWithMemo(...)`.
+
+Operator fulfillment flow:
+
+```bash
+TIP20_BRIDGE_DEPOSIT=0xTip20BridgeDeposit
+TIP20_TOKEN=0x20c...
+BRIDGE_RECIPIENT=0xRecipient
+BRIDGE_AMOUNT=1000000
+SOURCE_CHAIN_ID=42431
+SOURCE_TX_HASH=0xSourceDepositTxHash
+SOURCE_DEPOSIT_ID=1
+make tip20-fulfill-bridge-mint ARGS="--network tempo"
+```
+
+`BRIDGE_MEMO` is optional. If it is unset or zero, the script uses the no-memo `fulfillBridgeMint(...)` path and plain TIP-20 `mint(...)`. If it is nonzero, the script uses `fulfillBridgeMintWithMemo(...)` and TIP-20 `mintWithMemo(...)`.
+
+TIP-20 transfer policies and account-level receive policies still apply. The bridge contracts use balance-delta checks so receive-policy redirects or blocked deliveries revert instead of silently moving funds into recovery custody.
+
 ## Bridge Contracts
 
 The bridge infrastructure enables cross-chain token transfers using a burn-and-mint mechanism.
