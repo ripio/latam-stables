@@ -59,6 +59,10 @@ contract Tip20LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausabl
         _;
     }
 
+    /// @notice Registers a token with a fixed mint destination and a daily mint cap.
+    /// @dev A `dailyMaxMint` of 0 is permitted: the token registers successfully but every mint
+    ///      reverts with `ExceedsDailyMintLimit` until `updateDailyMintLimit` raises the cap.
+    ///      This supports the "register now, set the limit later" operational flow.
     function registerToken(address token, address mintDestination, uint256 dailyMaxMint)
         external
         onlyRole(TOKEN_CONFIG_ADMIN_ROLE)
@@ -72,6 +76,10 @@ contract Tip20LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausabl
         emit TokenRegistered(token, mintDestination, dailyMaxMint);
     }
 
+    /// @notice Unregisters a token, clearing its config.
+    /// @dev `mintedPerDay` is intentionally NOT cleared. If a token is unregistered and
+    ///      re-registered within the same UTC day, the day's accumulated minted amount is
+    ///      retained — this prevents resetting the daily cap via an unregister/re-register cycle.
     function unregisterToken(address token) external onlyRole(TOKEN_CONFIG_ADMIN_ROLE) tokenExists(token) {
         delete tokenConfigs[token];
         emit TokenUnregistered(token);
@@ -86,6 +94,11 @@ contract Tip20LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausabl
         emit DailyMintLimitUpdated(token, newLimit);
     }
 
+    /// @notice Updates the fixed mint destination for a token.
+    /// @dev The change takes effect immediately with no timelock. Holders of
+    ///      `TOKEN_CONFIG_ADMIN_ROLE` and `MINTER_ROLE` together can therefore direct freshly
+    ///      minted supply to any address (up to the daily cap). These roles are trusted and
+    ///      MUST be held by the Safe multisig, not by EOAs.
     function updateMintDestination(address token, address newDestination)
         external
         onlyRole(TOKEN_CONFIG_ADMIN_ROLE)
@@ -115,16 +128,6 @@ contract Tip20LimitedMinter is AccessControlEnumerable, ReentrancyGuard, Pausabl
     }
 
     function mintWithMemo(address token, uint256 mintAmount, bytes32 memo)
-        external
-        onlyRole(MINTER_ROLE)
-        tokenExists(token)
-        nonReentrant
-        whenNotPaused
-    {
-        _mint(token, mintAmount, memo, true);
-    }
-
-    function mint(address token, uint256 mintAmount, bytes32 memo)
         external
         onlyRole(MINTER_ROLE)
         tokenExists(token)
