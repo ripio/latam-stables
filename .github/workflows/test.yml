@@ -27,6 +27,9 @@ jobs:
         run: |
           forge --version
 
+      - name: Test Makefile network selection
+        run: test/MakefileNetworkSelection.sh
+
       - name: Run Forge fmt
         run: |
           forge fmt --check
