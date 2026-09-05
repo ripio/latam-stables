@@ -19,10 +19,13 @@ import {BridgeDeposit} from "../../src/BridgeDeposit.sol";
  *  - BRIDGE_DEPOSIT: Expected BridgeDeposit address
  */
 contract VerifyDeployment is Script {
-    function run() public view {
-        address limitedMinterAddr = vm.envAddress("LIMITED_MINTER_BRIDGE");
-        address bridgeDepositAddr = vm.envAddress("BRIDGE_DEPOSIT");
+    error DeploymentVerificationFailed();
 
+    function run() public view {
+        _verifyDeployment(vm.envAddress("LIMITED_MINTER_BRIDGE"), vm.envAddress("BRIDGE_DEPOSIT"));
+    }
+
+    function _verifyDeployment(address limitedMinterAddr, address bridgeDepositAddr) internal view {
         console2.log("================================");
         console2.log("Verifying Deployment");
         console2.log("================================");
@@ -46,8 +49,9 @@ contract VerifyDeployment is Script {
             if (lmb.hasRole(minterRole, bridgeDepositAddr)) {
                 console2.log("  [OK] BridgeDeposit has MINTER_ROLE");
             } else {
-                console2.log("  [WARNING] BridgeDeposit missing MINTER_ROLE");
+                console2.log("  [ERROR] BridgeDeposit missing MINTER_ROLE");
                 console2.log("       Run: make grant-bridge-minter-role");
+                allOk = false;
             }
         }
 
@@ -75,11 +79,13 @@ contract VerifyDeployment is Script {
         }
 
         console2.log("================================");
-        if (allOk) {
-            console2.log("All checks passed!");
-        } else {
+        if (!allOk) {
             console2.log("Some checks failed. See errors above.");
+            console2.log("================================");
+            revert DeploymentVerificationFailed();
         }
+
+        console2.log("All checks passed!");
         console2.log("================================");
     }
 }
