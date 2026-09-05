@@ -55,41 +55,57 @@ anvil:
 forked-ethereum:
 	anvil -m "test test test test test test test test test test test junk" --steps-tracing --fork-url $(ETHEREUM_RPC_URL) --chain-id 7400 --base-fee 1000000000
 
+SUPPORTED_NETWORKS := ethereum sepolia worldchain-sepolia worldchain forked-ethereum zkLatestnet base
+NETWORK_FLAG_TOKENS := $(filter --network%,$(ARGS))
+
+define find_network
+$(if $(filter --network,$(firstword $(1))),$(word 2,$(1)),$(if $(word 2,$(1)),$(call find_network,$(wordlist 2,$(words $(1)),$(1)))))
+endef
+
+NETWORK := $(strip $(call find_network,$(ARGS)))
 NETWORK_ARGS := --rpc-url http://localhost:8545 --private-key $(DEFAULT_ANVIL_KEY) --broadcast
 
-ifeq ($(findstring --network ethereum,$(ARGS)),--network ethereum)
+ifneq ($(NETWORK_FLAG_TOKENS),)
+ifneq ($(words $(NETWORK_FLAG_TOKENS)),1)
+$(error Unsupported or malformed network in ARGS: $(ARGS). Supported networks: $(SUPPORTED_NETWORKS))
+endif
+endif
+
+ifeq ($(NETWORK),ethereum)
 	NETWORK_ARGS := --rpc-url $(ETHEREUM_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1600000000
 	VERIFY_ARGS := --verify --chain-id 1 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
-else ifeq ($(findstring --network sepolia,$(ARGS)),--network sepolia)
+else ifeq ($(NETWORK),sepolia)
 	NETWORK_ARGS := --rpc-url $(SEPOLIA_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 8000000 
 	VERIFY_ARGS := --verify --chain-id 11155111 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
-else ifeq ($(findstring --network worldchain-sepolia,$(ARGS)),--network worldchain-sepolia)
+else ifeq ($(NETWORK),worldchain-sepolia)
 	NETWORK_ARGS := --rpc-url $(WORLDCHAIN_SEPOLIA_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1000350 
 	VERIFY_ARGS := --verify --chain-id 4801 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
-else ifeq ($(findstring --network worldchain,$(ARGS)),--network worldchain)
+else ifeq ($(NETWORK),worldchain)
 	NETWORK_ARGS := --rpc-url $(WORLDCHAIN_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 1009000 
 	VERIFY_ARGS := --verify --chain-id 480 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
 
-else ifeq ($(findstring --network forked-ethereum,$(ARGS)),--network forked-ethereum)
+else ifeq ($(NETWORK),forked-ethereum)
 	NETWORK_ARGS := --rpc-url $(FORKED_ETHEREUM_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 8000000000
 	VERIFY_ARGS := 
 
-else ifeq ($(findstring --network zkLatestnet,$(ARGS)),--network zkLatestnet)
+else ifeq ($(NETWORK),zkLatestnet)
 	NETWORK_ARGS := --rpc-url $(LATESTNET_ZK_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 25000000 --skip-simulation --slow --gas-limit 10000000
 	VERIFY_ARGS := --verify --chain-id 14183 --verifier custom --verifier-url $(LATESTNET_ZK_VERIFIER_URL) 
 
-else ifeq ($(findstring --network base,$(ARGS)),--network base)
+else ifeq ($(NETWORK),base)
 	NETWORK_ARGS := --rpc-url $(BASE_RPC_URL) --keystore $(KEYSTORE_PATH) --password $(KEYSTORE_PASSWORD) --broadcast --with-gas-price 2500000 
 	VERIFY_ARGS := --verify --chain-id 8453 --verifier etherscan --etherscan-api-key $(ETHERSCAN_API_KEY)
+else ifneq ($(NETWORK_FLAG_TOKENS),)
+$(error Unsupported or malformed network '$(NETWORK)'. Supported networks: $(SUPPORTED_NETWORKS))
 else
 	VERIFY_ARGS :=
 endif
 
 # Determine if we're using a local Anvil chain
-ifeq ($(findstring --network,$(ARGS)),)
+ifeq ($(NETWORK),)
 # Local Anvil deployment - use default Anvil account
 WALLET_ADDRESS := $(shell cast wallet address --private-key $(DEFAULT_ANVIL_KEY))
 else ifneq ($(KEYSTORE_PATH),)
